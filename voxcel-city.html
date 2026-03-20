@@ -157,7 +157,13 @@ const CLOTH=[
 {nm:'イエローT',em:'🟡',pr:500,bc:0xffcc22,lc:0x4466aa,id:6,style:'separates'},{nm:'パープルコート',em:'🟣',pr:2000,bc:0x8844cc,lc:0x332244,id:7,style:'separates'},
 {nm:'デニムJK',em:'🔵',pr:900,bc:0x4466aa,lc:0x222244,id:8,style:'separates'},{nm:'ストライプ',em:'🟤',pr:700,bc:0xaa8866,lc:0x333333,id:9,style:'separates'},
 ];
-const HAIRS=[{nm:'ショート',em:'💇',pr:0,sy:0.45},{nm:'ロング',em:'💇‍♀️',pr:500,sy:0.8},{nm:'モヒカン',em:'🦁',pr:800,sy:1.0},{nm:'ツイン',em:'🎀',pr:600,sy:0.55},{nm:'ボブ',em:'💆',pr:400,sy:0.6}];
+const HAIRS=[
+{nm:'ショート',em:'💇',pr:0,sy:0.45,by:0.42,bz:0.26},
+{nm:'ロング',em:'💇‍♀️',pr:500,sy:0.8,by:0.9,bz:0.2},
+{nm:'モヒカン',em:'🦁',pr:800,sy:1.0,by:0.2,bz:0.16},
+{nm:'ツイン',em:'🎀',pr:600,sy:0.55,by:0.68,bz:0.32},
+{nm:'ボブ',em:'💆',pr:400,sy:0.6,by:0.56,bz:0.28}
+];
 const HCLR=[{nm:'黒',c:0x1d2940,pr:0},{nm:'茶',c:0x8B4513,pr:300},{nm:'金',c:0xFFD700,pr:500},{nm:'赤',c:0xCC2222,pr:500},{nm:'ピンク',c:0xFF69B4,pr:700},{nm:'青',c:0x2266FF,pr:700},{nm:'白',c:0xEEEEEE,pr:400},{nm:'緑',c:0x22AA44,pr:600},{nm:'紫',c:0x9933CC,pr:600}];
 const FURN=[
 {nm:'ソファ',em:'🛋️',pr:2000,w:2.2,h:0.9,d:1,c:0xaa5533},{nm:'テーブル',em:'🪑',pr:1500,w:1.5,h:0.75,d:1,c:0x886644},
@@ -1109,12 +1115,38 @@ addVehicle({axis:'ew',road:0,dir:-1,type:'bus',color:0xdd5533,offset:138,speed:3
 /* ═══ PLAYER ═══ */
 const PLAYER_BASE_Y=1.2;
 const DRESS_LEG_SCALE={x:0.72,y:0.7,z:0.72};
-const PG=new THREE.Group();const bMat=new THREE.MeshStandardMaterial({color:0x2c8cff,roughness:0.55,metalness:0.12}),sMat=new THREE.MeshStandardMaterial({color:0xffd7b7,roughness:0.85}),hMat=new THREE.MeshStandardMaterial({color:0x1d2940,roughness:0.9}),lMat=new THREE.MeshStandardMaterial({color:0x1d2940,roughness:0.9}),dMat=new THREE.MeshStandardMaterial({color:0xff88bb,roughness:0.62,metalness:0.05});
+function mkAvatarTex(size,base,noise=12,lines=false){
+  const cv=document.createElement('canvas');cv.width=cv.height=size;const cx=cv.getContext('2d');
+  cx.fillStyle=base;cx.fillRect(0,0,size,size);
+  if(lines){
+    cx.globalAlpha=0.18;
+    for(let x=0;x<size;x+=3){
+      cx.fillStyle=x%9===0?'#2b2b2b':'#3a3a3a';
+      cx.fillRect(x,0,1,size);
+    }
+  }
+  for(let i=0;i<noise*size;i++){
+    cx.globalAlpha=0.04+Math.random()*0.08;
+    const v=lines?170+((Math.random()*55)|0):190+((Math.random()*45)|0);
+    cx.fillStyle=`rgb(${v},${v},${v})`;
+    cx.fillRect((Math.random()*size)|0,(Math.random()*size)|0,1,1);
+  }
+  cx.globalAlpha=1;
+  const tex=new THREE.CanvasTexture(cv);
+  tex.colorSpace=THREE.SRGBColorSpace;
+  tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
+  tex.repeat.set(1,1);
+  return tex;
+}
+const skinTex=mkAvatarTex(128,'#ffd7b7',8,false);
+const hairTex=mkAvatarTex(128,'#f0f0f0',10,true);
+const PG=new THREE.Group();const bMat=new THREE.MeshStandardMaterial({color:0x2c8cff,roughness:0.55,metalness:0.12}),sMat=new THREE.MeshStandardMaterial({color:0xffd7b7,roughness:0.8,map:skinTex}),hMat=new THREE.MeshStandardMaterial({color:0x1d2940,roughness:0.76,metalness:0.03,map:hairTex}),lMat=new THREE.MeshStandardMaterial({color:0x1d2940,roughness:0.9}),dMat=new THREE.MeshStandardMaterial({color:0xff88bb,roughness:0.62,metalness:0.05});
 const pTorso=new THREE.Mesh(new THREE.BoxGeometry(1.3,1.5,0.8),bMat);pTorso.position.y=0.55;pTorso.castShadow=true;PG.add(pTorso);
 const pH=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),sMat);pH.position.y=1.75;pH.castShadow=true;PG.add(pH);
 const pHair=new THREE.Mesh(new THREE.BoxGeometry(1.08,0.45,1.08),hMat);pHair.position.set(0,2.08,0);pHair.castShadow=true;PG.add(pHair);
+const pHairBack=new THREE.Mesh(new THREE.BoxGeometry(1.0,0.45,0.22),hMat);pHairBack.position.set(0,1.86,-0.58);pHairBack.castShadow=true;PG.add(pHairBack);
 const pDress=new THREE.Mesh(new THREE.CylinderGeometry(0.52,0.95,1.9,4),dMat);pDress.rotation.y=Math.PI/4;pDress.position.set(0,0.22,0);pDress.castShadow=true;pDress.visible=false;PG.add(pDress);
-const eGeo=new THREE.BoxGeometry(0.09,0.09,0.04);const wM=new THREE.MeshStandardMaterial({color:0xffffff});const eyL=new THREE.Mesh(eGeo,wM);eyL.position.set(-0.18,1.75,0.53);PG.add(eyL);const eyR=new THREE.Mesh(eGeo,wM);eyR.position.set(0.18,1.75,0.53);PG.add(eyR);
+const eGeo=new THREE.BoxGeometry(0.09,0.09,0.04);const wM=new THREE.MeshStandardMaterial({color:0x101010,roughness:0.45});const eyL=new THREE.Mesh(eGeo,wM);eyL.position.set(-0.18,1.75,0.53);PG.add(eyL);const eyR=new THREE.Mesh(eGeo,wM);eyR.position.set(0.18,1.75,0.53);PG.add(eyR);
 const pA=[],pL=[],pArmMeshes=[],pLegMeshes=[];function addLimb(w,h,d,mt,x,y,arr,meshes){const p=new THREE.Group();p.position.set(x,y,0);const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mt);m.position.y=-h/2;m.castShadow=true;p.add(m);PG.add(p);arr.push(p);if(meshes)meshes.push(m);}
 addLimb(0.35,1.2,0.35,sMat,-0.88,1.1,pA,pArmMeshes);addLimb(0.35,1.2,0.35,sMat,0.88,1.1,pA,pArmMeshes);addLimb(0.4,1.4,0.4,lMat,-0.35,-0.06,pL,pLegMeshes);addLimb(0.4,1.4,0.4,lMat,0.35,-0.06,pL,pLegMeshes);
 PG.scale.setScalar(0.82);
@@ -1383,6 +1415,11 @@ function updApp(){
   const hr=HAIRS[S.hair],hc=HCLR[S.hairC];
   pHair.scale.y=hr.sy/0.45;
   pHair.position.y=2.08-(hr.sy-0.45)*0.5;
+  const by=hr.by??0.42,bz=hr.bz??0.26;
+  pHairBack.scale.y=by/0.42;
+  pHairBack.scale.z=bz/0.26;
+  pHairBack.position.y=1.86-(by-0.42)*0.46;
+  pHairBack.position.z=-0.58-(bz-0.26)*0.3;
   hMat.color.setHex(hc.c);
 }
 
