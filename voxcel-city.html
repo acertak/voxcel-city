@@ -936,6 +936,110 @@ resH.push(cottagePos);
   });
 }
 
+// ═══ CALICO KITTENS (GLB) ═══
+const cats=[];
+const CAT_BASE_Y=0;
+{
+  const loader=new GLTFLoader();
+  const catSpawns=[
+    {x:-85,z:30,name:'Mochi'},   // park area
+    {x:-50,z:55,name:'Kinako'},  // near cottage
+    {x:-95,z:22,name:'Azuki'}    // park edge
+  ];
+  loader.load('models/calico-kitten.glb',gltf=>{
+    const srcModel=gltf.scene;
+    const box=new THREE.Box3().setFromObject(srcModel);
+    const size=box.getSize(new THREE.Vector3());
+    const maxDim=Math.max(size.x,size.y,size.z);
+    const scale=1.2/maxDim;
+    srcModel.scale.setScalar(scale);
+    srcModel.traverse(ch=>{if(ch.isMesh){ch.castShadow=true;ch.receiveShadow=true;}});
+    catSpawns.forEach((sp,i)=>{
+      const model=i===0?srcModel:srcModel.clone();
+      const b=new THREE.Box3().setFromObject(model);
+      model.position.set(sp.x,-b.min.y,sp.z);
+      // Random initial rotation
+      model.rotation.y=Math.random()*Math.PI*2;
+      scene.add(model);
+      cats.push({
+        m:model,name:sp.name,
+        x:sp.x,z:sp.z,cx:sp.x,cz:sp.z,
+        state:'idle',stateTimer:1+Math.random()*2,
+        targetX:sp.x,targetZ:sp.z,
+        speed:1.2+Math.random()*0.6,
+        wanderRadius:8+Math.random()*4,
+        phase:i*2.1,  // animation phase offset
+        headBob:0,tailWag:0,
+        sitY:0,groomT:0
+      });
+    });
+  });
+}
+
+function updateCats(dt,el){
+  cats.forEach((c,i)=>{
+    c.stateTimer-=dt;
+    if(c.stateTimer<=0){
+      // State transitions
+      const r=Math.random();
+      if(c.state==='idle'){
+        if(r<0.55){
+          // Start wandering
+          c.state='wander';
+          const ang=Math.random()*Math.PI*2;
+          const dist=2+Math.random()*c.wanderRadius;
+          c.targetX=c.cx+Math.cos(ang)*dist;
+          c.targetZ=c.cz+Math.sin(ang)*dist;
+          c.stateTimer=3+Math.random()*4;
+        }else if(r<0.8){
+          c.state='sit';c.stateTimer=2+Math.random()*3;
+        }else{
+          c.state='groom';c.stateTimer=1.5+Math.random()*2;
+        }
+      }else{
+        c.state='idle';c.stateTimer=1+Math.random()*3;
+      }
+    }
+    // State behavior
+    if(c.state==='wander'){
+      const dx=c.targetX-c.x,dz=c.targetZ-c.z;
+      const d=Math.sqrt(dx*dx+dz*dz);
+      if(d>0.3){
+        const s=c.speed*dt;
+        c.x+=(dx/d)*s;c.z+=(dz/d)*s;
+        c.m.position.x=c.x;c.m.position.z=c.z;
+        c.m.rotation.y=Math.atan2(dx,dz);
+        // Walking bob
+        const bob=Math.sin(el*8+c.phase)*0.03;
+        c.m.position.y=CAT_BASE_Y+Math.abs(bob);
+      }else{
+        c.state='idle';c.stateTimer=1+Math.random()*2;
+      }
+    }else if(c.state==='sit'){
+      // Lower body slightly when sitting
+      c.sitY+=(0.05-c.sitY)*dt*3;
+      c.m.position.y=CAT_BASE_Y-c.sitY;
+    }else if(c.state==='groom'){
+      // Subtle head-bobbing motion via slight rotation
+      c.groomT+=dt*4;
+      c.m.rotation.x=Math.sin(c.groomT)*0.08;
+      c.m.rotation.z=Math.sin(c.groomT*0.7)*0.04;
+    }else{
+      // idle - slowly return to neutral
+      c.m.position.y+=(CAT_BASE_Y-c.m.position.y)*dt*3;
+      c.m.rotation.x*=0.95;c.m.rotation.z*=0.95;
+      c.sitY*=0.95;
+      // Occasional head turn
+      if(Math.random()<0.01){
+        c.m.rotation.y+=((Math.random()-0.5)*0.5);
+      }
+    }
+    // Continuous tail wag via subtle body sway
+    c.tailWag=Math.sin(el*3+c.phase)*0.015;
+    c.m.rotation.z+=c.tailWag*0.1;
+  });
+}
+
 function mkFlowerPatch(x,z,r=1.5,count=14,palette=[0xff8fb1,0xffd95a,0xfff4d6,0x8fd87d]){
   const g=new THREE.Group();g.position.set(x,0,z);
   const colors=palette.map(c=>new THREE.MeshStandardMaterial({color:c,roughness:0.9}));
@@ -1965,6 +2069,7 @@ function loop(){
   coolWanted(dt);
   updatePolice(dt,el);
   clouds.forEach(c=>{c.m.position.x=c.base.x+Math.sin(el*c.spd+c.dr)*12;c.m.position.z=c.base.z+Math.cos(el*c.spd*0.7+c.dr)*7;});
+  updateCats(dt,el);
   // Police station siren pulse
   const pbd=bldData['police'];if(pbd&&pbd.sirenMats){const sp=Math.sin(el*5);pbd.sirenMats[0].emissiveIntensity=sp>0?0.8+sp*0.8:0.15;pbd.sirenMats[1].emissiveIntensity=sp<0?0.8-sp*0.8:0.15;}
   if(fW)fW.position.y=0.7+Math.sin(el*2)*0.04;
