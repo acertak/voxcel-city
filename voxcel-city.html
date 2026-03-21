@@ -299,12 +299,12 @@ function mkPedSignalTexture(mode='stop'){
   });
 }
 const grassTex=mkSurfaceTexture(1024,14,14,(ctx,size)=>{
-  ctx.fillStyle='#4a9244';
-  ctx.fillRect(0,0,size,size);
-  perlinNoise(ctx,size,80,0.08,'#3a7a38');
-  ctx.globalCompositeOperation='source-over';
-  perlinNoise(ctx,size,160,0.05,'#5aaa50');
-  scatterDots(ctx,size,1200,0.3,1.2,['#4d8d4c','#58a84f','#47834a','#509848'],0.35);
+  const cols=['#4a7a3b','#5a9a48','#3d6e30','#509245','#477a3a','#5ca04c','#3b6a2e','#4e8a40','#558f46','#436f35','#5b9d4a','#3e7232','#4c8742','#47803c','#529444','#3f7533'];
+  const g=16;const cs=size/g;
+  for(let y=0;y<g;y++)for(let x=0;x<g;x++){
+    ctx.fillStyle=cols[(x*7+y*13+x*y)%cols.length];
+    ctx.fillRect(x*cs,y*cs,cs+1,cs+1);
+  }
 });
 const asphaltTex=mkSurfaceTexture(1024,3.2,32,(ctx,size)=>{
   ctx.fillStyle='#343842';
