@@ -66,6 +66,13 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 .sb2{padding:14px 44px;border-radius:18px;border:none;font-size:16px;font-weight:800;color:#0a1020;background:linear-gradient(135deg,#7ce2ff,#ffd86b);box-shadow:0 10px 30px rgba(111,212,255,0.3);cursor:pointer}
 .fl{text-align:left;background:rgba(255,255,255,0.04);border-radius:12px;padding:12px;margin-bottom:16px;font-size:11px;line-height:1.9}
 hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
+.arrest-ov{position:fixed;inset:0;z-index:250;pointer-events:none;display:none}.arrest-ov.show{display:block;pointer-events:auto}
+.arrest-fade{position:fixed;inset:0;background:#000;opacity:0;transition:opacity 0.8s ease;z-index:251}.arrest-fade.dark{opacity:1}
+.jail-hud{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:252;text-align:center;opacity:0;transition:opacity 0.5s}.jail-hud.show{opacity:1}
+.jail-hud h2{font-size:28px;font-weight:900;color:var(--red);margin-bottom:12px;text-shadow:0 0 20px rgba(255,60,60,0.4)}
+.jail-hud .jt{font-size:52px;font-weight:900;color:white;font-family:monospace;text-shadow:0 0 30px rgba(255,255,255,0.3)}
+.jail-hud .jm{font-size:13px;color:rgba(255,255,255,0.5);margin-top:10px}
+.arrest-txt{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%) scale(0.8);z-index:253;font-size:42px;font-weight:900;color:#ff4444;text-shadow:0 0 30px rgba(255,0,0,0.6),0 4px 20px rgba(0,0,0,0.5);opacity:0;transition:opacity 0.3s,transform 0.5s;pointer-events:none;letter-spacing:0.1em}.arrest-txt.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
 /* Interaction marker floating over objects */
 .marker3d{position:absolute;pointer-events:none;z-index:15;font-size:11px;font-weight:700;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:3px 10px;color:var(--accent);backdrop-filter:blur(8px);white-space:nowrap;opacity:0;transition:opacity .2s}.marker3d.show{opacity:1}
 @media(max-width:600px){.ig{grid-template-columns:repeat(auto-fill,minmax(85px,1fr))}.md{padding:12px}}
@@ -81,7 +88,7 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 🏪 お店の中に入って買い物＆バイト<br>👗 服屋・💇 美容院で着替え＆イメチェン<br>
 🛋️ 家具屋で買って自宅に配置<br>🏠 自宅でクローゼット・冷蔵庫・ベッドを使おう<br>
 🚗 車や人が行き交う街を探索・🌅 昼夜サイクル<br>
-🚓 違反すると指名手配、警官隊が出動<br>
+🚓 違反すると指名手配、逮捕されると牢屋で1日過ごす<br>
 📱 左下スティックで移動 / 右下スティックで視点
 </div>
 <button class="sb2" id="goBtn">ゲーム開始</button>
@@ -114,6 +121,8 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="arrest-ov" id="arrestOv"><div class="arrest-fade" id="arrestFade"></div><div class="jail-hud" id="jailHud"><h2>🔒 留置所</h2><div class="jt" id="jailTime">23:59</div><div class="jm">釈放まで待機中...</div></div></div>
+<div class="arrest-txt" id="arrestTxt"></div>
 <div class="mo" id="mO"><div class="md" id="mC"></div></div>
 
 <script type="module">
@@ -121,7 +130,7 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
 
 const S={money:5000,energy:100,hunger:100,joy:80,day:1,hair:0,hairC:0,outfit:0,
 ownC:[0],ownFu:[],placeFu:[],ownFd:[],loc:'city',gameTime:8.4,timeSpeed:0.4,
-insideBld:null,vehicle:null,wantedHeat:0,wantedLevel:0,wantedReason:'街は平穏',wantedCooldown:0};
+insideBld:null,vehicle:null,wantedHeat:0,wantedLevel:0,wantedReason:'街は平穏',wantedCooldown:0,jailed:false,arrestPhase:null,arrestTimer:0,jailReleaseDay:0};
 
 /* ═══ DATA ═══ */
 const BLDS=[
@@ -136,6 +145,7 @@ const BLDS=[
 {id:'hosp',nm:'病院',em:'🏥',x:72,z:-38,w:16,d:14,h:10,c:0xeeeeff,tp:'heal',ic:0xf0f0f8},
 {id:'bank',nm:'シティバンク',em:'🏦',x:72,z:-10,w:14,d:12,h:9,c:0x4455aa,tp:'bank',ic:0xd0d8e8},
 {id:'home',nm:'マイホーム',em:'🏠',x:72,z:36,w:16,d:16,h:8,c:0x7799bb,tp:'home',ic:0xe0d0c0},
+{id:'police',nm:'警察署',em:'🚔',x:72,z:58,w:14,d:12,h:9,c:0x3a4a6a,tp:'police',ic:0xd0d8e8},
 ];
 BLDS.forEach(b=>{b.h*=1.28;});
 
@@ -683,6 +693,21 @@ function addBuildingFacade(b,bd){
   if(['heal','bank'].includes(b.tp)){
     [-b.w*0.3,-b.w*0.1,b.w*0.1,b.w*0.3].forEach(off=>mkWall(b.x+off,b.h/2,b.z-b.d/2-0.32,0.42,b.h*0.9,0.18,new THREE.MeshStandardMaterial({color:0xd9e0ea,roughness:0.78})));
   }
+  if(b.tp==='police'){
+    // Pillars at entrance
+    [-b.w*0.32,b.w*0.32].forEach(off=>{
+      mkWall(b.x+off,b.h/2,b.z-b.d/2-0.3,0.5,b.h,0.5,new THREE.MeshStandardMaterial({color:0x8090a0,roughness:0.6,metalness:0.15}));
+    });
+    // Blue stripe accent on front
+    mkWall(b.x,b.h*0.82,b.z-b.d/2-0.08,b.w*0.8,0.3,0.1,new THREE.MeshStandardMaterial({color:0x2255aa,emissive:0x1133aa,emissiveIntensity:0.2,roughness:0.4}));
+    // Siren light on roof
+    const sirenBase=mkWall(b.x,b.h+0.5,b.z-b.d/4,0.8,0.3,0.4,new THREE.MeshStandardMaterial({color:0x222233,roughness:0.5}));
+    const sirenRedMat=new THREE.MeshStandardMaterial({color:0xff3344,emissive:0xff2233,emissiveIntensity:0.6});
+    const sirenBlueMat=new THREE.MeshStandardMaterial({color:0x3377ff,emissive:0x2255ff,emissiveIntensity:0.6});
+    mkWall(b.x-0.25,b.h+0.72,b.z-b.d/4,0.28,0.15,0.28,sirenRedMat);
+    mkWall(b.x+0.25,b.h+0.72,b.z-b.d/4,0.28,0.15,0.28,sirenBlueMat);
+    bd.sirenMats=[sirenRedMat,sirenBlueMat];
+  }
   for(let wx=-b.w/2+1.5;wx<b.w/2-1.2;wx+=2.5){
     for(let wy=2.1;wy<b.h-1;wy+=2.4){
       if(Math.abs(wx)<1.35&&wy<3.4) continue;
@@ -827,6 +852,55 @@ function buildInterior(b,bd){
     const rug=new THREE.Mesh(new THREE.BoxGeometry(3,0.02,2.5),M(0xcc8866));rug.position.set(bx,0.02,bz);scene.add(rug);
     // Furniture placement label
     bd.interiorPts.push({pos:new THREE.Vector3(bx+3,0,bz),label:'🛋️ 家具配置',action:'furniture'});
+  }
+  if(b.tp==='police'){
+    bd.interiorPts.push({pos:new THREE.Vector3(bx+1,0,bz+b.d/2-2.5),label:'📋 受付',action:'shop'});
+    // Reception desk
+    const pDesk=new THREE.Mesh(new THREE.BoxGeometry(b.w*0.4,1,1),M(0x886655));pDesk.position.set(bx+1,0.5,bz+b.d/2-2);pDesk.castShadow=true;scene.add(pDesk);
+    const pReg=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.25,0.35),M(0x333344));pReg.position.set(bx+2,1.13,bz+b.d/2-2);scene.add(pReg);
+    // Wanted board
+    const wBoard=new THREE.Mesh(new THREE.BoxGeometry(2.5,1.8,0.08),M(0xddddcc));wBoard.position.set(bx+4,2.2,bz+b.d/2-0.4);scene.add(wBoard);
+    // Police emblem on wall
+    const emblem=new THREE.Mesh(new THREE.CircleGeometry(0.6,6),new THREE.MeshStandardMaterial({color:0xffd700,emissive:0xaa8800,emissiveIntensity:0.3,metalness:0.5}));
+    emblem.position.set(bx,b.h*0.7,bz+b.d/2-0.3);scene.add(emblem);
+    // Filing cabinets
+    for(let fi=-3;fi<=3;fi+=2){
+      const cab=new THREE.Mesh(new THREE.BoxGeometry(0.8,1.6,0.5),M(0x556677));cab.position.set(bx+fi,0.8,bz+b.d/2-0.6);scene.add(cab);
+    }
+    // Jail cells (2 cells at back of building)
+    const cellW=4.5,cellD=4,cellH=b.h-0.5;
+    const cellZ=bz-b.d/2+cellD/2+0.5;
+    bd.jailBars=[];
+    [-3.2,3.2].forEach((cx,ci)=>{
+      const wallMat=new THREE.MeshStandardMaterial({color:0x606070,roughness:0.95});
+      // Cell back wall
+      mkWall(bx+cx,cellH/2,cellZ-cellD/2,cellW,cellH,0.25,wallMat);
+      // Cell side walls
+      mkWall(bx+cx-cellW/2,cellH/2,cellZ,0.25,cellH,cellD,wallMat);
+      mkWall(bx+cx+cellW/2,cellH/2,cellZ,0.25,cellH,cellD,wallMat);
+      // Bars (front of cell)
+      const barMat=new THREE.MeshStandardMaterial({color:0x555566,roughness:0.35,metalness:0.75});
+      mkWall(bx+cx,cellH-0.15,cellZ+cellD/2,cellW,0.12,0.12,barMat);
+      mkWall(bx+cx,0.06,cellZ+cellD/2,cellW,0.12,0.12,barMat);
+      // Vertical bars
+      for(let bx2=-cellW/2+0.35;bx2<=cellW/2-0.2;bx2+=0.5){
+        const bar=mkWall(bx+cx+bx2,cellH/2,cellZ+cellD/2,0.07,cellH,0.07,barMat);
+        if(ci===0){bar.userData.origX=bar.position.x;bd.jailBars.push(bar);}
+      }
+      // Cell bed/bench
+      const cellBed=new THREE.Mesh(new THREE.BoxGeometry(2.2,0.3,1.2),M(0x667078));cellBed.position.set(bx+cx,0.15,cellZ-1.2);cellBed.castShadow=true;scene.add(cellBed);
+      const cellMat=new THREE.Mesh(new THREE.BoxGeometry(2,0.08,1),M(0x778088));cellMat.position.set(bx+cx,0.35,cellZ-1.2);scene.add(cellMat);
+      // Toilet
+      const toiletBase=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.35,0.5),M(0xeeeee8));toiletBase.position.set(bx+cx+1.4,0.18,cellZ-cellD/2+0.8);scene.add(toiletBase);
+      const toiletBowl=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.22,0.12,8),M(0xeeeee8));toiletBowl.position.set(bx+cx+1.4,0.42,cellZ-cellD/2+0.8);scene.add(toiletBowl);
+    });
+    // Store first cell position for jail teleport
+    bd.jailCell={x:bx-3.2,z:cellZ,w:cellW-1.2,d:cellD-1.2};
+    // Divider wall between reception and cells
+    mkWall(bx,cellH/2,cellZ+cellD/2+0.8,b.w*0.3,cellH,0.2,new THREE.MeshStandardMaterial({color:0x556065,roughness:0.9}));
+    // Desk lamp
+    const deskLamp=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.12,0.5,8),new THREE.MeshStandardMaterial({color:0x33aa33,emissive:0x228822,emissiveIntensity:0.3}));
+    deskLamp.position.set(bx-1,1.25,bz+b.d/2-2);scene.add(deskLamp);
   }
 }
 
@@ -1239,6 +1313,7 @@ const iBtn=document.getElementById('iBtn'),lL_=document.getElementById('lL');
 
 function checkInteraction(){
   nearAction=null;
+  if(S.arrestPhase){iBtn.classList.remove('show');return;}
   const p=PG.position;let md=3;
   if(S.vehicle){
     nearAction={label:'🚪 降りる',action:'vehicle-exit'};
@@ -1266,7 +1341,7 @@ function checkInteraction(){
 }
 
 function doInteract(){
-  if(!nearAction) return;
+  if(!nearAction||S.arrestPhase) return;
   const a=nearAction;
   if(a.action==='enter') enterBuilding(a.bld);
   else if(a.action==='vehicle-enter') enterVehicle(a.vehicle);
@@ -1322,7 +1397,7 @@ function coolWanted(dt){
 
 /* ═══ SHOP MENUS ═══ */
 function openShop(b){
-  switch(b.tp){case'food':openFood(b);break;case'cloth':openCloth();break;case'hair':openHair();break;case'furn':openFurnShop();break;case'book':openBook();break;case'heal':openHeal();break;case'bank':openBank();break;}
+  switch(b.tp){case'food':openFood(b);break;case'cloth':openCloth();break;case'hair':openHair();break;case'furn':openFurnShop();break;case'book':openBook();break;case'heal':openHeal();break;case'bank':openBank();break;case'police':openPolice();break;}
 }
 function openFood(b){
   const fl=FOODS.filter(f=>f.st===b.id);let h=`<h2>${b.em} メニュー</h2><div class="ig">`;
@@ -1354,6 +1429,8 @@ function openFurnShop(){let h=`<h2>🛋️ 家具</h2><div class="ig">`;FURN.for
 function openBook(){let h=`<h2>📚 本</h2><div class="ig">`;BOOKS.forEach((b,i)=>{h+=`<div class="ic" onclick="W._read(${i})"><div class="ii">${b.em}</div><div class="nm">${b.nm}</div><div class="pr">${b.pr}円</div><div style="font-size:9px;opacity:.6">😊+${b.jo}</div></div>`;});h+=`</div><div class="br"><button class="bt bs" onclick="W._cls()">閉じる</button></div>`;showM(h);}
 function openHeal(){showM(`<h2>🏥 病院</h2><div style="text-align:center;padding:16px"><div style="font-size:48px">🏥</div><p>体力: ${S.energy}% → 100%</p><p style="color:var(--accent2)">500円</p></div><div class="br"><button class="bt bp" onclick="W._heal()">💊 治療</button><button class="bt bs" onclick="W._cls()">閉じる</button></div>`);}
 function openBank(){showM(`<h2>🏦 シティバンク</h2><div style="text-align:center;padding:16px"><div style="font-size:48px">🏦</div><p>所持金: <strong style="color:var(--accent2)">${S.money.toLocaleString()}円</strong></p><div style="margin-top:12px;background:rgba(255,255,255,0.04);border-radius:10px;padding:10px;font-size:11px;line-height:1.8;text-align:left">👗 ${S.ownC.length}着 / 🛋️ ${S.ownFu.length}個 / 🍱 ${S.ownFd.length}個 / 📅 ${S.day}日目</div></div><div class="br"><button class="bt bs" onclick="W._cls()">閉じる</button></div>`);}
+
+function openPolice(){showM(`<h2>🚔 警察署</h2><div style="text-align:center;padding:16px"><div style="font-size:48px">🚔</div><p>現在の手配レベル: <strong style="color:${S.wantedLevel?'var(--red)':'var(--green)'}">${S.wantedLevel?'★'.repeat(S.wantedLevel)+' Lv.'+S.wantedLevel:'なし ✓'}</strong></p><p style="margin-top:10px;font-size:12px;opacity:0.6;line-height:1.8">違反を犯すと手配されます。<br>逮捕されると<strong style="color:var(--red)">1日留置所</strong>で過ごし、<br><strong style="color:var(--accent2)">罰金1000円</strong>を支払います。</p><div style="margin-top:12px;background:rgba(255,255,255,0.04);border-radius:10px;padding:10px;font-size:11px;line-height:1.8;text-align:left">🚗 赤信号無視: +★★<br>🏃 歩道暴走: +★<br>🚶 歩行者接触: +★★★<br>💥 車両追突: +★★</div></div><div class="br"><button class="bt bs" onclick="W._cls()">閉じる</button></div>`);}
 
 // Home-specific menus
 function openCloset(){
@@ -1633,13 +1710,174 @@ function updatePolice(dt,el){
       }
       const swing=Math.sin(el*7+i)*0.5;
       unit.officer.userData.limbs?.forEach((limb,index)=>{limb.rotation.x=index%2===0?swing:-swing;});
-      if(od<2.2){
+      if(od<1.8&&!S.arrestPhase&&!S.jailed){
+        startArrest(unit);
+      }else if(od<2.8){
         S.energy=Math.max(0,S.energy-dt*(4+S.wantedLevel));
       }
     }else{
       unit.officer.visible=false;
     }
   });
+}
+
+/* ═══ ARREST / JAIL ═══ */
+let arrestUnit=null;
+function startArrest(unit){
+  if(S.arrestPhase||S.jailed) return;
+  if(S.vehicle) exitVehicle();
+  if(S.insideBld) exitBuilding();
+  S.arrestPhase='tackle';S.arrestTimer=0;arrestUnit=unit;
+  const atxt=document.getElementById('arrestTxt');
+  atxt.textContent='🚨 逮捕！';atxt.classList.add('show');
+  setTimeout(()=>atxt.classList.remove('show'),2200);
+  toast('🚔 警察に捕まった！');
+}
+function updateArrest(dt,el){
+  if(!S.arrestPhase) return;
+  S.arrestTimer+=dt;
+  switch(S.arrestPhase){
+    case 'tackle':{
+      // Officer rushes toward player
+      if(arrestUnit&&arrestUnit.officer.visible){
+        const ox=PG.position.x-arrestUnit.officer.position.x;
+        const oz=PG.position.z-arrestUnit.officer.position.z;
+        const od=Math.hypot(ox,oz);
+        if(od>0.5){
+          arrestUnit.officer.position.x+=ox/od*10*dt;
+          arrestUnit.officer.position.z+=oz/od*10*dt;
+          arrestUnit.officer.rotation.y=Math.atan2(ox,oz);
+        }
+        const sw=Math.sin(el*16)*0.9;
+        arrestUnit.officer.userData.limbs?.forEach((limb,i)=>{limb.rotation.x=i%2===0?sw:-sw;});
+      }
+      // Player stumbles backward and falls
+      const fall=Math.min(1,S.arrestTimer/0.7);
+      PG.rotation.x=fall*(-Math.PI/4);
+      pA[0].rotation.x=-fall*1.4;pA[1].rotation.x=-fall*1.4;
+      pA[0].rotation.z=fall*0.6;pA[1].rotation.z=-fall*0.6;
+      // Legs buckle
+      pL[0].rotation.x=fall*0.3;pL[1].rotation.x=-fall*0.2;
+      if(S.arrestTimer>=1.2){S.arrestPhase='cuff';S.arrestTimer=0;}
+      break;
+    }
+    case 'cuff':{
+      // Player on ground, arms pulled behind back (handcuff)
+      PG.rotation.x=-Math.PI/4;
+      const cp=Math.min(1,S.arrestTimer/0.7);
+      pA[0].rotation.x=-1.4+cp*2.8;pA[1].rotation.x=-1.4+cp*2.8;
+      pA[0].rotation.z=0.6-cp*1.2;pA[1].rotation.z=-0.6+cp*1.2;
+      // Player slowly rotates face down
+      PG.rotation.x=-Math.PI/4-cp*Math.PI/6;
+      // Officer stands still
+      if(arrestUnit){
+        arrestUnit.officer.userData.limbs?.forEach(limb=>{limb.rotation.x*=0.85;});
+      }
+      if(S.arrestTimer>=1.0){S.arrestPhase='fadeout';S.arrestTimer=0;}
+      break;
+    }
+    case 'fadeout':{
+      const fo=document.getElementById('arrestOv'),ff=document.getElementById('arrestFade');
+      fo.classList.add('show');ff.classList.add('dark');
+      if(S.arrestTimer>=1.2){
+        // Reset player pose
+        PG.rotation.x=0;
+        pA[0].rotation.x=0;pA[1].rotation.x=0;
+        pA[0].rotation.z=0;pA[1].rotation.z=0;
+        pL[0].rotation.x=0;pL[1].rotation.x=0;
+        // Teleport to jail cell
+        const policeB=BLDS.find(b=>b.id==='police');
+        const pb=bldData['police'];
+        if(policeB&&pb&&pb.jailCell){
+          enterBuilding(policeB);
+          const cell=pb.jailCell;
+          PG.position.set(cell.x,PLAYER_BASE_Y,cell.z);
+          cYaw=0;cPitch=0.45;targetCamDist=6;
+        }
+        S.jailed=true;S.jailReleaseDay=S.day+1;
+        setWantedHeat(0,'逮捕済み');
+        while(policeUnits.length) removePoliceUnit(policeUnits[0]);
+        document.getElementById('jailHud').classList.add('show');
+        S.arrestPhase='jailed';S.arrestTimer=0;
+      }
+      break;
+    }
+    case 'jailed':{
+      // Fast-forward time (1 game day in ~4 real seconds)
+      S.gameTime+=dt*5.8;
+      while(S.gameTime>=24){S.gameTime-=24;S.day++;updHUD();}
+      // Update jail timer display
+      let hoursLeft;
+      if(S.day<S.jailReleaseDay) hoursLeft=(24-S.gameTime)+(S.jailReleaseDay-S.day-1)*24;
+      else hoursLeft=Math.max(0,6-S.gameTime);
+      const hh=Math.floor(Math.max(0,hoursLeft)),mm=Math.floor((Math.max(0,hoursLeft)-hh)*60);
+      document.getElementById('jailTime').textContent=`${hh.toString().padStart(2,'0')}:${mm.toString().padStart(2,'0')}`;
+      // Sitting animation on bench
+      PG.position.y=PLAYER_BASE_Y-0.25;
+      pL[0].rotation.x=-Math.PI/2.2;pL[1].rotation.x=-Math.PI/2.2;
+      pA[0].rotation.x=0.3;pA[1].rotation.x=0.3;
+      // Subtle head movement (looking around the cell)
+      const headIdle=Math.sin(el*0.8)*0.08;
+      pH.rotation.y=headIdle;pH.rotation.x=Math.sin(el*1.3)*0.04+0.05;
+      // Occasional body shift
+      const bodyIdle=Math.sin(el*0.5)*0.02;
+      PG.rotation.y=bodyIdle;
+      // Restrict movement to cell
+      const pb2=bldData['police'];
+      if(pb2&&pb2.jailCell){
+        const cell=pb2.jailCell;
+        PG.position.x=clamp(PG.position.x,cell.x-cell.w/2,cell.x+cell.w/2);
+        PG.position.z=clamp(PG.position.z,cell.z-cell.d/2,cell.z+cell.d/2);
+      }
+      // Release check - release at 6:00 AM on release day
+      if(S.day>=S.jailReleaseDay&&S.gameTime>=6){
+        S.arrestPhase='release';S.arrestTimer=0;
+        document.getElementById('jailHud').classList.remove('show');
+        const atxt=document.getElementById('arrestTxt');
+        atxt.textContent='🔓 釈放！';atxt.classList.add('show');
+        setTimeout(()=>atxt.classList.remove('show'),2200);
+      }
+      break;
+    }
+    case 'release':{
+      // Stand up from bench animation
+      const sp=Math.min(1,S.arrestTimer/0.8);
+      PG.position.y=PLAYER_BASE_Y-0.25+sp*0.25;
+      pL[0].rotation.x=-Math.PI/2.2*(1-sp);pL[1].rotation.x=-Math.PI/2.2*(1-sp);
+      pA[0].rotation.x=0.3*(1-sp);pA[1].rotation.x=0.3*(1-sp);
+      pH.rotation.y=0;pH.rotation.x=0;
+      PG.rotation.y*=0.9;
+      // Bars slide open
+      const pb3=bldData['police'];
+      if(pb3&&pb3.jailBars){
+        const openAmt=sp*4;
+        pb3.jailBars.forEach(bar=>{bar.position.x=bar.userData.origX-openAmt;});
+      }
+      if(S.arrestTimer>=1.0){
+        S.arrestPhase='fadein';S.arrestTimer=0;
+        document.getElementById('arrestFade').classList.remove('dark');
+      }
+      break;
+    }
+    case 'fadein':{
+      if(S.arrestTimer>=1.0){
+        exitBuilding();
+        document.getElementById('arrestOv').classList.remove('show');
+        S.arrestPhase=null;S.jailed=false;S.arrestTimer=0;arrestUnit=null;
+        PG.rotation.x=0;PG.position.y=PLAYER_BASE_Y;
+        pA[0].rotation.z=0;pA[1].rotation.z=0;
+        pH.rotation.y=0;pH.rotation.x=0;
+        // Restore bars
+        const pb4=bldData['police'];
+        if(pb4&&pb4.jailBars){pb4.jailBars.forEach(bar=>{bar.position.x=bar.userData.origX;});}
+        // Fine
+        const fine=Math.min(S.money,1000);
+        S.money-=fine;S.energy=Math.max(30,S.energy);
+        updHUD();toast(`💸 罰金${fine}円を支払い釈放された`);
+      }
+      break;
+    }
+  }
 }
 
 /* ═══ GAME LOOP ═══ */
@@ -1650,7 +1888,8 @@ function loop(){
   let strafe=0,forward=0;
   if(keys['a']||keys['arrowleft'])strafe-=1;if(keys['d']||keys['arrowright'])strafe+=1;if(keys['w']||keys['arrowup'])forward+=1;if(keys['s']||keys['arrowdown'])forward-=1;
   if(isMob){strafe+=mv.x;forward-=mv.y;}
-  if(S.vehicle){
+  updateArrest(dt,el);
+  if(!S.arrestPhase){if(S.vehicle){
     updatePlayerVehicle(dt,clamp(strafe,-1,1),clamp(forward,-1,1));
     PG.position.set(S.vehicle.m.position.x,PLAYER_BASE_Y,S.vehicle.m.position.z);
     PG.rotation.y=S.vehicle.m.rotation.y;
@@ -1670,7 +1909,7 @@ function loop(){
     if(!blocked){PG.position.x=Math.max(-140,Math.min(140,nx));PG.position.z=Math.max(-140,Math.min(140,nz));}
     PG.rotation.y=Math.atan2(md.x,md.z);
     const sw=Math.sin(el*10)*0.55;pA[0].rotation.x=sw;pA[1].rotation.x=-sw;pL[0].rotation.x=-sw;pL[1].rotation.x=sw;
-  }else{pA[0].rotation.x*=0.88;pA[1].rotation.x*=0.88;pL[0].rotation.x*=0.88;pL[1].rotation.x*=0.88;}
+  }else{pA[0].rotation.x*=0.88;pA[1].rotation.x*=0.88;pL[0].rotation.x*=0.88;pL[1].rotation.x*=0.88;}}
   shadowD.position.set(PG.position.x,0.02,PG.position.z);
   updSignals(dt);
   npcs.forEach((n,i)=>{
@@ -1717,16 +1956,18 @@ function loop(){
   coolWanted(dt);
   updatePolice(dt,el);
   clouds.forEach(c=>{c.m.position.x=c.base.x+Math.sin(el*c.spd+c.dr)*12;c.m.position.z=c.base.z+Math.cos(el*c.spd*0.7+c.dr)*7;});
+  // Police station siren pulse
+  const pbd=bldData['police'];if(pbd&&pbd.sirenMats){const sp=Math.sin(el*5);pbd.sirenMats[0].emissiveIntensity=sp>0?0.8+sp*0.8:0.15;pbd.sirenMats[1].emissiveIntensity=sp<0?0.8-sp*0.8:0.15;}
   if(fW)fW.position.y=0.7+Math.sin(el*2)*0.04;
   fountainJets.forEach((jet,i)=>{jet.scale.y=0.92+Math.sin(el*3+i*1.2)*0.14;jet.material.opacity=0.48+Math.sin(el*4+i)*0.08;});
   checkInteraction();
   S.hunger=Math.max(0,S.hunger-dt*0.12);if(S.hunger<=0)S.energy=Math.max(0,S.energy-dt*0.25);S.joy=Math.max(0,S.joy-dt*0.04);updHUD();
-  updTime(dt);updCam();drawMM();renderer.render(scene,camera);
+  updTime(S.jailed?0:dt);updCam();drawMM();renderer.render(scene,camera);
 }
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 window.__voxcelTest={
   start(){document.getElementById('goBtn').click();},
-  resetPlayer(){if(S.vehicle)S.vehicle.manual=false;S.vehicle=null;PG.visible=true;shadowD.visible=true;PG.position.set(0,PLAYER_BASE_Y,15);PG.rotation.y=0;cYaw=Math.PI;cPitch=0.38;curCamDist=16;targetCamDist=16;setWantedHeat(0,'街は平穏');while(policeUnits.length)removePoliceUnit(policeUnits[0]);},
+  resetPlayer(){if(S.vehicle)S.vehicle.manual=false;S.vehicle=null;if(S.insideBld)exitBuilding();PG.visible=true;shadowD.visible=true;PG.position.set(0,PLAYER_BASE_Y,15);PG.rotation.y=0;PG.rotation.x=0;PG.position.y=PLAYER_BASE_Y;pA[0].rotation.z=0;pA[1].rotation.z=0;pH.rotation.y=0;pH.rotation.x=0;cYaw=Math.PI;cPitch=0.38;curCamDist=16;targetCamDist=16;setWantedHeat(0,'街は平穏');while(policeUnits.length)removePoliceUnit(policeUnits[0]);S.jailed=false;S.arrestPhase=null;S.arrestTimer=0;arrestUnit=null;document.getElementById('arrestOv')?.classList.remove('show');document.getElementById('arrestFade')?.classList.remove('dark');document.getElementById('jailHud')?.classList.remove('show');const pb5=bldData['police'];if(pb5&&pb5.jailBars)pb5.jailBars.forEach(bar=>{bar.position.x=bar.userData.origX;});},
   setPlayer(x,z,yaw=Math.PI){if(S.vehicle)S.vehicle.manual=false;S.vehicle=null;PG.visible=true;shadowD.visible=true;PG.position.set(x,PLAYER_BASE_Y,z);cYaw=yaw;cPitch=0.32;},
   setSignal(step=0,timer=0){signalStep=((step%SIGNAL_SEQUENCE.length)+SIGNAL_SEQUENCE.length)%SIGNAL_SEQUENCE.length;signalTimer=Math.max(0,Math.min(timer,getSignalState().duration-0.01));updSignals(0);return this.sample();},
   advanceSignal(dt=1){updSignals(dt);return this.sample();},
@@ -1768,6 +2009,7 @@ window.__voxcelTest={
       traffic:{cars:cars.length,buses:cars.filter(c=>c.type==='bus').length,pedestrians:npcs.length},
       wanted:{level:S.wantedLevel,heat:Math.round(S.wantedHeat),reason:S.wantedReason},
       police:{units:policeUnits.length,officers:policeUnits.filter(unit=>unit.officer.visible).length},
+      jail:{active:S.jailed,phase:S.arrestPhase,releaseDay:S.jailReleaseDay},
       appearance:{
         hair:{
           id:S.hair,
