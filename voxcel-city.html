@@ -127,6 +127,7 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 
 <script type="module">
 import * as THREE from 'https://esm.sh/three@0.160.0';
+import {GLTFLoader} from 'https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
 
 const S={money:5000,energy:100,hunger:100,joy:80,day:1,hair:0,hairC:0,outfit:0,
 ownC:[0],ownFu:[],placeFu:[],ownFd:[],loc:'city',gameTime:8.4,timeSpeed:0.4,
@@ -913,6 +914,27 @@ const houseRoofTex=mkSurfaceTexture(512,2,2,(ctx,size)=>{ctx.fillStyle=`rgb(${rR
 const rg=new THREE.ConeGeometry(Math.max(hw,hd)*0.7,2,4);const roof=new THREE.Mesh(rg,new THREE.MeshStandardMaterial({color:0xffffff,map:houseRoofTex,roughness:0.82}));roof.position.set(hx,hh+1,hz);roof.rotation.y=Math.PI/4;roof.castShadow=true;scene.add(roof);
   addResidenceLot({x:hx,z:hz,w:hw,d:hd,h:hh});
 resH.push({x:hx,z:hz,w:hw,d:hd,h:hh});}
+
+// Enchanted Cottage (GLB model)
+const cottagePos={x:-55,z:50,w:10,d:10,h:8};
+addResidenceLot({x:cottagePos.x,z:cottagePos.z,w:cottagePos.w,d:cottagePos.d,h:cottagePos.h});
+resH.push(cottagePos);
+{
+  const loader=new GLTFLoader();
+  loader.load('assets/enchanted-cottage.glb',gltf=>{
+    const model=gltf.scene;
+    const box=new THREE.Box3().setFromObject(model);
+    const size=box.getSize(new THREE.Vector3());
+    const maxDim=Math.max(size.x,size.y,size.z);
+    const scale=8/maxDim;
+    model.scale.setScalar(scale);
+    const scaledBox=new THREE.Box3().setFromObject(model);
+    const center=scaledBox.getCenter(new THREE.Vector3());
+    model.position.set(cottagePos.x-center.x,0-scaledBox.min.y,cottagePos.z-center.z);
+    model.traverse(child=>{if(child.isMesh){child.castShadow=true;child.receiveShadow=true;}});
+    scene.add(model);
+  });
+}
 
 function mkFlowerPatch(x,z,r=1.5,count=14,palette=[0xff8fb1,0xffd95a,0xfff4d6,0x8fd87d]){
   const g=new THREE.Group();g.position.set(x,0,z);

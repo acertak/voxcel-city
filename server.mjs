@@ -12,6 +12,7 @@ const contentTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".glb": "model/gltf-binary",
 };
 
 createServer((req, res) => {
