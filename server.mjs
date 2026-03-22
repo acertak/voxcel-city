@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 
 const host = "127.0.0.1";
@@ -28,8 +28,32 @@ createServer((req, res) => {
       return;
     }
 
+    const contentType = contentTypes[extname(filePath)] || "application/octet-stream";
+
+    if (pathname === "/index.html") {
+      let html = readFileSync(filePath, "utf8");
+      if (!html.includes("window.__voxcelPlayer")) {
+        html = html.replace(
+          "N.add(_t);var be=",
+          "N.add(_t);window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t};var be=",
+        );
+      }
+      if (!html.includes("avatar-loader.js") && !html.includes("__voxcelInlineAvatarLoader")) {
+        html = html.replace(
+          "</body>",
+          '<script type="module" src="/avatar-loader.js"></script></body>',
+        );
+      }
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Cache-Control": "no-store",
+      });
+      res.end(html);
+      return;
+    }
+
     res.writeHead(200, {
-      "Content-Type": contentTypes[extname(filePath)] || "application/octet-stream",
+      "Content-Type": contentType,
       "Cache-Control": "no-store",
     });
     createReadStream(filePath).pipe(res);
