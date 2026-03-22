@@ -130,6 +130,17 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
 import {GLTFLoader} from 'https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js';
 
+const MODEL_CDN_BASE='https://cdn.jsdelivr.net/gh/acertak/voxcel-city@main';
+
+function loadModelWithFallback(loader,urls,onLoad){
+  let index=0;
+  const tryNext=()=>{
+    if(index>=urls.length) return;
+    loader.load(urls[index],onLoad,undefined,()=>{index+=1;tryNext();});
+  };
+  tryNext();
+}
+
 const S={money:5000,energy:100,hunger:100,joy:80,day:1,hair:0,hairC:0,outfit:0,
 ownC:[0],ownFu:[],placeFu:[],ownFd:[],loc:'city',gameTime:8.4,timeSpeed:0.4,
 insideBld:null,vehicle:null,wantedHeat:0,wantedLevel:0,wantedReason:'街は平穏',wantedCooldown:0,jailed:false,arrestPhase:null,arrestTimer:0,jailReleaseDay:0};
@@ -922,7 +933,10 @@ addResidenceLot({x:cottagePos.x,z:cottagePos.z,w:cottagePos.w,d:cottagePos.d,h:c
 resH.push(cottagePos);
 {
   const loader=new GLTFLoader();
-  loader.load('assets/enchanted-cottage.glb',gltf=>{
+  loadModelWithFallback(loader,[
+    `${MODEL_CDN_BASE}/assets/enchanted-cottage.glb`,
+    'assets/enchanted-cottage.glb',
+  ],gltf=>{
     const model=gltf.scene;
     const box=new THREE.Box3().setFromObject(model);
     const size=box.getSize(new THREE.Vector3());
@@ -947,7 +961,10 @@ const CAT_BASE_Y=0;
     {x:-50,z:55,name:'Kinako'},  // near cottage
     {x:-95,z:22,name:'Azuki'}    // park edge
   ];
-  loader.load('models/calico-kitten.glb',gltf=>{
+  loadModelWithFallback(loader,[
+    `${MODEL_CDN_BASE}/models/calico-kitten.glb`,
+    'models/calico-kitten.glb',
+  ],gltf=>{
     const srcModel=gltf.scene;
     const animations=gltf.animations;
     const box=new THREE.Box3().setFromObject(srcModel);
@@ -1056,7 +1073,10 @@ const dogs=[];
     {x:58,z:18,yaw:1.82,roamRadius:1.7,speed:0.36,groundOffset:0.18},
     {x:76,z:46,yaw:-1.15,roamRadius:1.5,speed:0.37,groundOffset:0.18}
   ];
-  loader.load('models/white-puppy-happy-run.glb',gltf=>{
+  loadModelWithFallback(loader,[
+    `${MODEL_CDN_BASE}/models/white-puppy-happy-run.glb`,
+    'models/white-puppy-happy-run.glb',
+  ],gltf=>{
     const srcModel=gltf.scene;
     const animations=gltf.animations;
     const box=new THREE.Box3().setFromObject(srcModel);
