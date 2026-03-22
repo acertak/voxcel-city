@@ -3,10 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "node ./server.mjs",
     "preview": "node ./server.mjs",
+    "start": "node ./server.mjs",
     "test:e2e": "playwright test"
   },
-  "dependencies": {
+  "devDependencies": {
     "playwright": "^1.58.2"
   }
 }
