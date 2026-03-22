@@ -128,6 +128,7 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 <script type="module">
 import * as THREE from 'https://esm.sh/three@0.160.0';
 import {GLTFLoader} from 'https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js';
 
 const S={money:5000,energy:100,hunger:100,joy:80,day:1,hair:0,hairC:0,outfit:0,
 ownC:[0],ownFu:[],placeFu:[],ownFd:[],loc:'city',gameTime:8.4,timeSpeed:0.4,
@@ -948,6 +949,7 @@ const CAT_BASE_Y=0;
   ];
   loader.load('models/calico-kitten.glb',gltf=>{
     const srcModel=gltf.scene;
+    const animations=gltf.animations;
     const box=new THREE.Box3().setFromObject(srcModel);
     const size=box.getSize(new THREE.Vector3());
     const maxDim=Math.max(size.x,size.y,size.z);
@@ -955,20 +957,29 @@ const CAT_BASE_Y=0;
     srcModel.scale.setScalar(scale);
     srcModel.traverse(ch=>{if(ch.isMesh){ch.castShadow=true;ch.receiveShadow=true;}});
     catSpawns.forEach((sp,i)=>{
-      const model=i===0?srcModel:srcModel.clone();
+      const model=i===0?srcModel:SkeletonUtils.clone(srcModel);
       const b=new THREE.Box3().setFromObject(model);
       model.position.set(sp.x,-b.min.y,sp.z);
-      // Random initial rotation
       model.rotation.y=Math.random()*Math.PI*2;
       scene.add(model);
+      // Set up animation mixer
+      const mixer=new THREE.AnimationMixer(model);
+      let walkAction=null;
+      if(animations&&animations.length>0){
+        walkAction=mixer.clipAction(animations[0]);
+        walkAction.setLoop(THREE.LoopRepeat);
+        walkAction.timeScale=1.0+Math.random()*0.3;
+        walkAction.play();
+        walkAction.paused=true;
+      }
       cats.push({
-        m:model,name:sp.name,
+        m:model,name:sp.name,mixer,walkAction,
         x:sp.x,z:sp.z,cx:sp.x,cz:sp.z,
         state:'idle',stateTimer:1+Math.random()*2,
         targetX:sp.x,targetZ:sp.z,
         speed:1.2+Math.random()*0.6,
         wanderRadius:8+Math.random()*4,
-        phase:i*2.1,  // animation phase offset
+        phase:i*2.1,
         headBob:0,tailWag:0,
         sitY:0,groomT:0
       });
@@ -978,29 +989,32 @@ const CAT_BASE_Y=0;
 
 function updateCats(dt,el){
   cats.forEach((c,i)=>{
+    // Update animation mixer
+    if(c.mixer) c.mixer.update(dt);
     c.stateTimer-=dt;
     if(c.stateTimer<=0){
-      // State transitions
       const r=Math.random();
       if(c.state==='idle'){
         if(r<0.55){
-          // Start wandering
           c.state='wander';
           const ang=Math.random()*Math.PI*2;
           const dist=2+Math.random()*c.wanderRadius;
           c.targetX=c.cx+Math.cos(ang)*dist;
           c.targetZ=c.cz+Math.sin(ang)*dist;
           c.stateTimer=3+Math.random()*4;
+          if(c.walkAction){c.walkAction.paused=false;c.walkAction.setEffectiveWeight(1);}
         }else if(r<0.8){
           c.state='sit';c.stateTimer=2+Math.random()*3;
+          if(c.walkAction){c.walkAction.paused=true;}
         }else{
           c.state='groom';c.stateTimer=1.5+Math.random()*2;
+          if(c.walkAction){c.walkAction.paused=true;}
         }
       }else{
         c.state='idle';c.stateTimer=1+Math.random()*3;
+        if(c.walkAction){c.walkAction.paused=true;}
       }
     }
-    // State behavior
     if(c.state==='wander'){
       const dx=c.targetX-c.x,dz=c.targetZ-c.z;
       const d=Math.sqrt(dx*dx+dz*dz);
@@ -1009,34 +1023,106 @@ function updateCats(dt,el){
         c.x+=(dx/d)*s;c.z+=(dz/d)*s;
         c.m.position.x=c.x;c.m.position.z=c.z;
         c.m.rotation.y=Math.atan2(dx,dz);
-        // Walking bob
-        const bob=Math.sin(el*8+c.phase)*0.03;
-        c.m.position.y=CAT_BASE_Y+Math.abs(bob);
       }else{
         c.state='idle';c.stateTimer=1+Math.random()*2;
+        if(c.walkAction){c.walkAction.paused=true;}
       }
     }else if(c.state==='sit'){
-      // Lower body slightly when sitting
       c.sitY+=(0.05-c.sitY)*dt*3;
       c.m.position.y=CAT_BASE_Y-c.sitY;
     }else if(c.state==='groom'){
-      // Subtle head-bobbing motion via slight rotation
       c.groomT+=dt*4;
       c.m.rotation.x=Math.sin(c.groomT)*0.08;
       c.m.rotation.z=Math.sin(c.groomT*0.7)*0.04;
     }else{
-      // idle - slowly return to neutral
       c.m.position.y+=(CAT_BASE_Y-c.m.position.y)*dt*3;
       c.m.rotation.x*=0.95;c.m.rotation.z*=0.95;
       c.sitY*=0.95;
-      // Occasional head turn
       if(Math.random()<0.01){
         c.m.rotation.y+=((Math.random()-0.5)*0.5);
       }
     }
-    // Continuous tail wag via subtle body sway
-    c.tailWag=Math.sin(el*3+c.phase)*0.015;
-    c.m.rotation.z+=c.tailWag*0.1;
+  });
+}
+
+// ═══ SCATTERED PUPPIES (GLB) ═══
+const dogs=[];
+{
+  const loader=new GLTFLoader();
+  const dogSpawns=[
+    {x:-102,z:22,yaw:0.75,roamRadius:1.8,speed:0.42,groundOffset:0.18},
+    {x:-18,z:35,yaw:-0.35,roamRadius:1.4,speed:0.38,groundOffset:0.18},
+    {x:18,z:30,yaw:2.35,roamRadius:1.5,speed:0.40,groundOffset:0.18},
+    {x:58,z:18,yaw:1.82,roamRadius:1.7,speed:0.36,groundOffset:0.18},
+    {x:76,z:46,yaw:-1.15,roamRadius:1.5,speed:0.37,groundOffset:0.18}
+  ];
+  loader.load('models/white-puppy-happy-run.glb',gltf=>{
+    const srcModel=gltf.scene;
+    const animations=gltf.animations;
+    const box=new THREE.Box3().setFromObject(srcModel);
+    const size=box.getSize(new THREE.Vector3());
+    const maxDim=Math.max(size.x,size.y,size.z);
+    const scale=1.45/maxDim;
+    srcModel.scale.setScalar(scale);
+    srcModel.traverse(ch=>{if(ch.isMesh){ch.castShadow=true;ch.receiveShadow=true;}});
+    dogSpawns.forEach((sp,i)=>{
+      const model=i===0?srcModel:SkeletonUtils.clone(srcModel);
+      const b=new THREE.Box3().setFromObject(model);
+      const groundY=-b.min.y+sp.groundOffset;
+      model.position.set(sp.x,groundY,sp.z);
+      model.rotation.y=sp.yaw;
+      scene.add(model);
+      const mixer=new THREE.AnimationMixer(model);
+      let runAction=null;
+      if(animations&&animations.length>0){
+        const clip=animations.find(a=>/run|happy/i.test(a.name))||animations[0];
+        runAction=mixer.clipAction(clip);
+        runAction.setLoop(THREE.LoopRepeat);
+        runAction.timeScale=0.9+Math.random()*0.18;
+        runAction.play();
+      }
+      dogs.push({
+        m:model,mixer,runAction,
+        x:sp.x,
+        z:sp.z,
+        anchorX:sp.x,
+        anchorZ:sp.z,
+        targetX:sp.x,
+        targetZ:sp.z,
+        roamRadius:sp.roamRadius,
+        speed:sp.speed,
+        heading:sp.yaw,
+        groundY,
+        bobSeed:i*1.7
+      });
+    });
+  });
+}
+
+function retargetDog(d){
+  const ang=Math.random()*Math.PI*2;
+  const dist=0.6+Math.random()*d.roamRadius;
+  d.targetX=d.anchorX+Math.cos(ang)*dist;
+  d.targetZ=d.anchorZ+Math.sin(ang)*dist;
+}
+
+function updateDogs(dt,el){
+  dogs.forEach(d=>{
+    if(d.mixer) d.mixer.update(dt);
+    const dx=d.targetX-d.m.position.x;
+    const dz=d.targetZ-d.m.position.z;
+    const dist=Math.hypot(dx,dz);
+    if(dist<0.12) retargetDog(d);
+    const tx=d.targetX-d.m.position.x;
+    const tz=d.targetZ-d.m.position.z;
+    const targetYaw=Math.atan2(tx,tz);
+    d.heading+=shortestAngle(d.heading,targetYaw)*Math.min(1,dt*3.5);
+    const speedScale=0.55+Math.min(1,dist/(d.roamRadius+0.6))*0.45;
+    const move=Math.min(d.speed*speedScale*dt,Math.max(dist-0.02,0));
+    d.m.position.x+=Math.sin(d.heading)*move;
+    d.m.position.z+=Math.cos(d.heading)*move;
+    d.m.rotation.y=d.heading;
+    d.m.position.y=d.groundY+Math.max(0,Math.sin(el*8+d.bobSeed))*0.035;
   });
 }
 
@@ -2069,6 +2155,7 @@ function loop(){
   coolWanted(dt);
   updatePolice(dt,el);
   clouds.forEach(c=>{c.m.position.x=c.base.x+Math.sin(el*c.spd+c.dr)*12;c.m.position.z=c.base.z+Math.cos(el*c.spd*0.7+c.dr)*7;});
+  updateDogs(dt,el);
   updateCats(dt,el);
   // Police station siren pulse
   const pbd=bldData['police'];if(pbd&&pbd.sirenMats){const sp=Math.sin(el*5);pbd.sirenMats[0].emissiveIntensity=sp>0?0.8+sp*0.8:0.15;pbd.sirenMats[1].emissiveIntensity=sp<0?0.8-sp*0.8:0.15;}
