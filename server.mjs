@@ -17,7 +17,7 @@ const contentTypes = {
 
 createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const pathname = url.pathname === "/" ? "/voxcel-city.html" : url.pathname;
+  const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = join(root, pathname);
 
   try {
