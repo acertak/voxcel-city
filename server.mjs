@@ -44,6 +44,12 @@ createServer((req, res) => {
           '<script type="module" src="/avatar-loader.js"></script></body>',
         );
       }
+      if (!html.includes("trex-loader.js")) {
+        html = html.replace(
+          "</body>",
+          '<script type="module" src="/trex-loader.js"></script></body>',
+        );
+      }
       res.writeHead(200, {
         "Content-Type": contentType,
         "Cache-Control": "no-store",
