@@ -1,5 +1,41 @@
 interface Env {
   ASSETS: Fetcher;
+  MYCRAFT_AUTH: Fetcher;
+}
+
+const BASIC_AUTH_CHALLENGE = 'Basic realm="MyCraft"';
+
+function unauthorized(): Response {
+  return new Response("Unauthorized", {
+    status: 401,
+    headers: {
+      "Cache-Control": "no-store",
+      "WWW-Authenticate": BASIC_AUTH_CHALLENGE,
+    },
+  });
+}
+
+async function authorizeWithMycraft(request: Request, env: Env): Promise<Response | null> {
+  const authorization = request.headers.get("Authorization");
+
+  if (!authorization?.startsWith("Basic ")) {
+    return unauthorized();
+  }
+
+  try {
+    const authResponse = await env.MYCRAFT_AUTH.fetch(
+      new Request("https://mycraft.internal/healthz", {
+        headers: { Authorization: authorization },
+      }),
+    );
+
+    return authResponse.ok ? null : unauthorized();
+  } catch {
+    return new Response("Authentication service unavailable", {
+      status: 503,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 }
 
 const PLAYER_HOOK =
@@ -24,6 +60,9 @@ function prepareAppShell(html: string): string {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const authFailure = await authorizeWithMycraft(request, env);
+    if (authFailure) return authFailure;
+
     const url = new URL(request.url);
     const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
     const assetUrl = new URL(pathname, request.url);

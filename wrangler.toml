@@ -7,6 +7,10 @@ routes = [
   { pattern = "voxcel-city.acertak.app", custom_domain = true }
 ]
 
+[[services]]
+binding = "MYCRAFT_AUTH"
+service = "mycraft-hono"
+
 [assets]
 directory = ".cloudflare-assets"
 binding = "ASSETS"
