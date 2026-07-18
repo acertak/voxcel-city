@@ -1,0 +1,14 @@
+name = "voxcel-city"
+main = "src/index.ts"
+compatibility_date = "2026-07-18"
+workers_dev = false
+preview_urls = false
+routes = [
+  { pattern = "voxcel-city.acertak.app", custom_domain = true }
+]
+
+[assets]
+directory = ".cloudflare-assets"
+binding = "ASSETS"
+html_handling = "none"
+run_worker_first = true

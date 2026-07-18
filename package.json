@@ -4,11 +4,18 @@
   "type": "module",
   "scripts": {
     "dev": "node ./server.mjs",
+    "dev:cloudflare": "npm run prepare:cloudflare-assets && wrangler dev",
     "preview": "node ./server.mjs",
     "start": "node ./server.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "prepare:cloudflare-assets": "node ./scripts/prepare-cloudflare-assets.mjs",
+    "typecheck": "tsc --noEmit",
+    "deploy": "npm run prepare:cloudflare-assets && wrangler deploy"
   },
   "devDependencies": {
-    "playwright": "^1.58.2"
+    "@cloudflare/workers-types": "^5.20260714.1",
+    "playwright": "^1.58.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.81.1"
   }
 }
