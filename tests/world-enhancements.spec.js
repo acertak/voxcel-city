@@ -42,7 +42,8 @@ test.describe("world enhancements", () => {
     const entered = await sample(page);
     expect(entered.enhancements.buildingId).toBe("salon");
     expect(entered.enhancements.usingDedicatedScene).toBe(true);
-    expect(entered.enhancements.movedObjectCount).toBeGreaterThan(5);
+    expect(entered.enhancements.themeFixtureCount).toBeGreaterThan(5);
+    expect(entered.enhancements.fixtureRoles).toContain("styling-station");
     expect(await page.evaluate(() => {
       return window.__voxcelPlayer.scene !== window.__voxcelEnhancements.cityScene;
     })).toBe(true);
@@ -50,7 +51,7 @@ test.describe("world enhancements", () => {
     await expect(page.locator("#toast")).toHaveText("");
     await expect(page.locator("#lL")).toBeHidden();
 
-    await setPlayer(page, 28, -23);
+    await setPlayer(page, 28, -18 - entered.enhancements.roomDimensions.depth / 2 + 1);
     await page.keyboard.press("e");
     await expect.poll(async () => (await sample(page)).enhancements.activeScene).toBe("city");
 
@@ -111,6 +112,7 @@ test.describe("world enhancements", () => {
     expect(salon.enhancements.blockedMoves).toBeGreaterThan(fountain.enhancements.blockedMoves);
     expect(salon.enhancements.colliderCount).toBeGreaterThan(3);
 
+    await setPlayer(page, 28, -18);
     await page.keyboard.press("e");
     await expect(page.locator("#mC")).toContainText("Hair Studio");
   });

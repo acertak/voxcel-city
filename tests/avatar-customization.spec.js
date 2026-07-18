@@ -22,10 +22,7 @@ async function enterHairStudio(page) {
   await setPlayer(page, 28, -25.8);
   await page.keyboard.press("e");
   await page.waitForTimeout(180);
-  await page.keyboard.down("ArrowDown");
-  await page.waitForTimeout(320);
-  await page.keyboard.up("ArrowDown");
-  await page.waitForTimeout(160);
+  await setPlayer(page, 28, -18);
   await page.keyboard.press("e");
   await expect(page.locator("#mC")).toContainText("Hair Studio");
 }
@@ -34,10 +31,7 @@ async function enterClothShop(page) {
   await setPlayer(page, 28, -49.8);
   await page.keyboard.press("e");
   await page.waitForTimeout(180);
-  await page.keyboard.down("ArrowDown");
-  await page.waitForTimeout(840);
-  await page.keyboard.up("ArrowDown");
-  await page.waitForTimeout(160);
+  await setPlayer(page, 28, -38.5);
   await page.keyboard.press("e");
   await expect(page.locator("#mC")).toContainText("👗 服");
 }
