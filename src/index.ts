@@ -19,13 +19,6 @@ function prepareAppShell(html: string): string {
     );
   }
 
-  if (!prepared.includes("trex-loader.js")) {
-    prepared = prepared.replace(
-      "</body>",
-      '<script type="module" src="/trex-loader.js"></script></body>',
-    );
-  }
-
   return prepared;
 }
 

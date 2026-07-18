@@ -1,11 +1,14 @@
 import { defineConfig } from "playwright/test";
 
+const testPort = process.env.PLAYWRIGHT_PORT || "3000";
+const testBaseURL = `http://127.0.0.1:${testPort}`;
+
 export default defineConfig({
   testDir: "./tests",
   timeout: 30_000,
   fullyParallel: false,
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: testBaseURL,
     headless: false,
     viewport: { width: 1600, height: 900 },
     launchOptions: {
@@ -13,8 +16,8 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: "npm run preview",
-    url: "http://127.0.0.1:3000",
+    command: `PORT=${testPort} npm run preview`,
+    url: testBaseURL,
     reuseExistingServer: true,
   },
 });
