@@ -41,7 +41,8 @@ async function authorizeWithMycraft(request: Request, env: Env): Promise<Respons
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const ENHANCED_PLAYER_HANDLE =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+const LEGACY_AVATAR_LOADER_ENABLED = false;
 
 function prepareAppShell(html: string): string {
   let prepared = html;
@@ -55,7 +56,11 @@ function prepareAppShell(html: string): string {
     );
   }
 
-  if (!prepared.includes("avatar-loader.js") && !prepared.includes("__voxcelInlineAvatarLoader")) {
+  if (
+    LEGACY_AVATAR_LOADER_ENABLED &&
+    !prepared.includes("avatar-loader.js") &&
+    !prepared.includes("__voxcelInlineAvatarLoader")
+  ) {
     prepared = prepared.replace(
       "</body>",
       '<script type="module" src="/avatar-loader.js"></script></body>',

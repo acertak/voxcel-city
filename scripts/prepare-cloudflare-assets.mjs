@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,15 +11,28 @@ await mkdir(output, { recursive: true });
 
 for (const name of [
   "index.html",
-  "avatar-loader.js",
+  "modular-character-system.js",
   "world-enhancements.js",
   "assets",
   "images",
-  "models",
 ]) {
   const source = join(root, name);
   if (existsSync(source)) {
     await cp(source, join(output, name), { recursive: true, force: true });
+  }
+}
+
+const modelsDirectory = join(root, "models");
+const outputModelsDirectory = join(output, "models");
+if (existsSync(modelsDirectory)) {
+  await mkdir(outputModelsDirectory, { recursive: true });
+  for (const entry of await readdir(modelsDirectory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".glb")) continue;
+    await cp(
+      join(modelsDirectory, entry.name),
+      join(outputModelsDirectory, entry.name),
+      { force: true },
+    );
   }
 }
 

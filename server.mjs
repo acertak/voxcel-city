@@ -9,7 +9,8 @@ const root = process.cwd();
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const ENHANCED_PLAYER_HANDLE =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+const LEGACY_AVATAR_LOADER_ENABLED = false;
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -45,7 +46,11 @@ createServer((req, res) => {
           `N.add(_t);${ENHANCED_PLAYER_HANDLE};var be=`,
         );
       }
-      if (!html.includes("avatar-loader.js") && !html.includes("__voxcelInlineAvatarLoader")) {
+      if (
+        LEGACY_AVATAR_LOADER_ENABLED &&
+        !html.includes("avatar-loader.js") &&
+        !html.includes("__voxcelInlineAvatarLoader")
+      ) {
         html = html.replace(
           "</body>",
           '<script type="module" src="/avatar-loader.js"></script></body>',

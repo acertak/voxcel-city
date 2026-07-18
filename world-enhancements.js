@@ -77,6 +77,7 @@
     originalInteractionPositions: [],
     adaptedNativeObjects: [],
     policeJailCellSnapshot: null,
+    beforeRenderCallbacks: new Set(),
   };
 
   function installUi() {
@@ -2111,7 +2112,18 @@
       enforceVehicleCollision(now);
       enforcePlayerCollision(now);
       updateInteriorShell();
-      return nativeRender(runtime.activeScene || requestedScene, requestedCamera);
+      const activeScene = runtime.activeScene || requestedScene;
+      for (const registration of runtime.beforeRenderCallbacks) {
+        try {
+          registration.callback(now, activeScene, requestedCamera, renderer);
+        } catch (error) {
+          registration.active = false;
+          registration.error = error;
+          runtime.beforeRenderCallbacks.delete(registration);
+          console.error("Voxcel before-render callback failed and was removed.", error);
+        }
+      }
+      return nativeRender(activeScene, requestedCamera);
     };
 
     function countLegacyRoomSurfaces() {
@@ -2210,6 +2222,22 @@
       cityScene,
       getActiveScene: () => runtime.activeScene,
       getState: publicState,
+      registerBeforeRender(callback) {
+        if (typeof callback !== "function") {
+          throw new TypeError("before-render callback must be a function");
+        }
+        const registration = { callback, active: true, error: null };
+        runtime.beforeRenderCallbacks.add(registration);
+        const unregister = () => {
+          registration.active = false;
+          return runtime.beforeRenderCallbacks.delete(registration);
+        };
+        Object.defineProperties(unregister, {
+          active: { get: () => registration.active },
+          error: { get: () => registration.error },
+        });
+        return unregister;
+      },
       refreshColliders: () => refreshColliderRegistry(performance.now(), true),
       acceptNextMove: () => {
         runtime.acceptNextMove = true;
