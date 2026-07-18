@@ -9,7 +9,14 @@ const output = join(root, ".cloudflare-assets");
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 
-for (const name of ["index.html", "avatar-loader.js", "assets", "images", "models"]) {
+for (const name of [
+  "index.html",
+  "avatar-loader.js",
+  "world-enhancements.js",
+  "assets",
+  "images",
+  "models",
+]) {
   const source = join(root, name);
   if (existsSync(source)) {
     await cp(source, join(output, name), { recursive: true, force: true });

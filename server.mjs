@@ -6,6 +6,11 @@ const host = "127.0.0.1";
 const port = Number(process.env.PORT || 3000);
 const root = process.cwd();
 
+const PLAYER_HANDLE =
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
+const ENHANCED_PLAYER_HANDLE =
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -32,10 +37,12 @@ createServer((req, res) => {
 
     if (pathname === "/index.html") {
       let html = readFileSync(filePath, "utf8");
-      if (!html.includes("window.__voxcelPlayer")) {
+      if (html.includes(PLAYER_HANDLE) && !html.includes("buildingViews:Je")) {
+        html = html.replace(PLAYER_HANDLE, ENHANCED_PLAYER_HANDLE);
+      } else if (!html.includes("window.__voxcelPlayer")) {
         html = html.replace(
           "N.add(_t);var be=",
-          "N.add(_t);window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t};var be=",
+          `N.add(_t);${ENHANCED_PLAYER_HANDLE};var be=`,
         );
       }
       if (!html.includes("avatar-loader.js") && !html.includes("__voxcelInlineAvatarLoader")) {

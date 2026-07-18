@@ -38,14 +38,21 @@ async function authorizeWithMycraft(request: Request, env: Env): Promise<Respons
   }
 }
 
-const PLAYER_HOOK =
-  "N.add(_t);window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t};var be=";
+const PLAYER_HANDLE =
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
+const ENHANCED_PLAYER_HANDLE =
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
 
 function prepareAppShell(html: string): string {
   let prepared = html;
 
-  if (!prepared.includes("window.__voxcelPlayer")) {
-    prepared = prepared.replace("N.add(_t);var be=", PLAYER_HOOK);
+  if (prepared.includes(PLAYER_HANDLE) && !prepared.includes("buildingViews:Je")) {
+    prepared = prepared.replace(PLAYER_HANDLE, ENHANCED_PLAYER_HANDLE);
+  } else if (!prepared.includes("window.__voxcelPlayer")) {
+    prepared = prepared.replace(
+      "N.add(_t);var be=",
+      `N.add(_t);${ENHANCED_PLAYER_HANDLE};var be=`,
+    );
   }
 
   if (!prepared.includes("avatar-loader.js") && !prepared.includes("__voxcelInlineAvatarLoader")) {
