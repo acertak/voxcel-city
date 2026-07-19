@@ -680,6 +680,8 @@
       .office-elevator-action.primary{border-color:rgba(255,214,102,.52);background:linear-gradient(180deg,rgba(190,143,53,.34),rgba(73,50,19,.82));color:#fff0b6}
       .office-elevator-floor-label{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:10px;opacity:.72}
       .office-floor-button.destination{border-color:rgba(128,224,161,.35)}
+      body.voxcel-elevator-scene-console .mo{align-items:flex-end;justify-content:flex-end;padding:18px;background:rgba(0,0,0,.08);pointer-events:none}
+      body.voxcel-elevator-scene-console .mo .md{width:min(360px,calc(100vw - 28px));max-height:calc(100vh - 36px);margin:0;pointer-events:auto;background:rgba(7,14,20,.94);border-color:rgba(111,212,255,.42);box-shadow:0 16px 48px rgba(0,0,0,.48)}
       @keyframes office-elevator-pulse{from{transform:scale(.82);opacity:.58}to{transform:scale(1.16);opacity:1}}
       @media(max-width:420px){.office-floor-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.office-floor-button{min-height:38px;font-size:10px}}
     `;
@@ -774,10 +776,26 @@
     return true;
   }
 
+  function isElevatorSceneActive() {
+    return Boolean(window.__voxcelEnhancements?.getState?.().elevatorSceneActive);
+  }
+
+  function hideElevatorModal() {
+    state.modalOpen = false;
+    modalOverlay?.classList.remove("show");
+    document.body.classList.remove("voxcel-elevator-scene-console");
+    if (modalContent?.dataset.officeElevator === "true") delete modalContent.dataset.officeElevator;
+  }
+
   function enterElevator() {
     if (state.elevatorMode !== "arrived") return false;
+    const sceneResult = window.__voxcelEnhancements?.enterElevatorScene?.();
+    if (sceneResult === false) {
+      runtime?.notify?.("エレベーターに乗り込めませんでした");
+      return false;
+    }
     setElevatorMode("inside-open", { doorsOpen: true, cabinEntered: true });
-    renderElevatorModal();
+    hideElevatorModal();
     runtime?.notify?.("エレベーターに乗り込みました");
     return true;
   }
@@ -792,6 +810,7 @@
 
   function leaveElevator() {
     if (state.elevatorMode !== "arrived") return false;
+    window.__voxcelEnhancements?.exitElevatorScene?.();
     setElevatorMode("call", { doorsOpen: false, cabinEntered: false, targetFloor: null });
     closeElevator();
     return true;
@@ -911,7 +930,10 @@
     closeButton.type = "button";
     closeButton.className = "bt bs";
     closeButton.textContent = "閉じる";
-    closeButton.addEventListener("click", closeElevator);
+    closeButton.addEventListener("click", () => {
+      if (isElevatorSceneActive()) hideElevatorModal();
+      else closeElevator();
+    });
     actions.appendChild(closeButton);
 
     modalContent.append(headingRow, note, statusBox, callActions, cabinActions, floorLabel, grid, actions);
@@ -924,10 +946,13 @@
     if (state.modalOpen && now - lastModalOpenAt < 250) return true;
     lastModalOpenAt = now;
     state.modalOpen = true;
-    setElevatorMode("call", { doorsOpen: false, cabinEntered: false, targetFloor: null });
+    if (!isElevatorSceneActive()) {
+      setElevatorMode("call", { doorsOpen: false, cabinEntered: false, targetFloor: null });
+    }
     renderElevatorModal();
     modalOverlay.classList.add("show");
     modalOverlay.setAttribute("aria-label", "オフィス・エレベーター");
+    document.body.classList.toggle("voxcel-elevator-scene-console", isElevatorSceneActive());
     return true;
   }
 
@@ -936,12 +961,12 @@
       window.clearTimeout(elevatorArrivalTimer);
       elevatorArrivalTimer = null;
     }
+    const sceneActive = isElevatorSceneActive();
     state.modalOpen = false;
-    setElevatorMode("idle", { doorsOpen: false, cabinEntered: false, targetFloor: null });
+    if (!sceneActive) setElevatorMode("idle", { doorsOpen: false, cabinEntered: false, targetFloor: null });
     if (modalContent?.dataset.officeElevator === "true") {
       if (modalContent.contains(document.activeElement)) interactionButton?.focus?.();
-      modalOverlay?.classList.remove("show");
-      delete modalContent.dataset.officeElevator;
+      hideElevatorModal();
     }
   }
 

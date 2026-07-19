@@ -35,6 +35,17 @@ test("operates the office elevator with call, doors, destination, and animated d
   await expect(page.getByText(/呼び出し中/)).toBeVisible();
   await expect(page.getByRole("button", { name: "扉が開く・乗り込む" })).toBeVisible({ timeout: 2_000 });
   await page.getByRole("button", { name: "扉が開く・乗り込む" }).click();
+  await expect.poll(async () => page.evaluate(() => ({
+    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
+    activeScene: window.__voxcelEnhancements.getState().activeScene,
+  }))).toEqual({ scene: true, activeScene: "elevator" });
+  expect(await page.evaluate(() => {
+    const player = window.__voxcelPlayer.playerRoot.position;
+    const camera = window.__voxcelPlayer.camera.position;
+    return Math.hypot(camera.x - player.x, camera.z - player.z);
+  })).toBeLessThan(3);
+  await page.keyboard.press("e");
+  await expect(page.getByRole("button", { name: "扉を閉じる" })).toBeVisible();
   await page.getByRole("button", { name: "扉を閉じる" }).click();
   await expect(page.getByText(/行き先階を押してください/)).toBeVisible();
 
@@ -43,7 +54,13 @@ test("operates the office elevator with call, doors, destination, and animated d
     floor: window.__voxcelOffice.getState().currentFloor,
     mode: window.__voxcelOffice.getState().elevatorState.mode,
     displayGoal: window.__voxcelEnhancements.getState().elevatorVisual?.displayGoal,
-  }))).toEqual({ floor: 25, mode: "arrived", displayGoal: 25 });
+    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
+  }))).toEqual({ floor: 25, mode: "arrived", displayGoal: 25, scene: true });
+  await page.getByRole("button", { name: "扉が開く・降りる" }).click();
+  await expect.poll(async () => page.evaluate(() => ({
+    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
+    activeScene: window.__voxcelEnhancements.getState().activeScene,
+  }))).toEqual({ scene: false, activeScene: "interior" });
   const visual = await page.evaluate(() => ({
     elevator: window.__voxcelEnhancements.getState().elevatorVisual,
     windows: window.__voxcelEnhancements.getState().officeWindows,

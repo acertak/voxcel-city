@@ -148,6 +148,10 @@
     officeElevatorVisual: null,
     officeDynamicTextures: new Set(),
     officeWindowCount: 0,
+    elevatorScene: null,
+    elevatorSceneActive: false,
+    elevatorReturnPosition: null,
+    elevatorPhase: "lobby",
   };
 
   function findPrototypeConstructor(object, methodName) {
@@ -2524,6 +2528,114 @@
       return true;
     }
 
+    function shiftPlayerTo(x, z) {
+      const deltaX = x - playerRoot.position.x;
+      const deltaZ = z - playerRoot.position.z;
+      playerRoot.position.x = x;
+      playerRoot.position.z = z;
+      playerShadow.position.x += deltaX;
+      playerShadow.position.z += deltaZ;
+      camera.position.x += deltaX;
+      camera.position.z += deltaZ;
+      runtime.lastPosition.copy(playerRoot.position);
+      runtime.acceptNextMove = true;
+    }
+
+    function createElevatorScene() {
+      const scene = new constructors.Scene();
+      scene.name = "OfficeElevatorScene";
+      scene.userData.voxcelElevatorScene = true;
+      if (runtime.interiorScene?.background?.clone) {
+        scene.background = runtime.interiorScene.background.clone();
+        scene.background.setHex(0x070b10);
+      } else if (cityScene.background?.clone) {
+        scene.background = cityScene.background.clone();
+        scene.background.setHex(0x070b10);
+      }
+      if (runtime.interiorScene?.fog?.clone) {
+        scene.fog = runtime.interiorScene.fog.clone();
+        scene.fog.color.setHex(0x070b10);
+        scene.fog.near = 16;
+        scene.fog.far = 42;
+      }
+      for (const child of runtime.interiorScene?.children || []) {
+        if (!child.isLight) continue;
+        const light = child.clone();
+        light.userData.voxcelElevatorOnly = true;
+        scene.add(light);
+      }
+      if (constructors.PointLight) {
+        const cabinLight = new constructors.PointLight(0xffe7b2, 1.45, 11);
+        cabinLight.name = "OfficeElevator:CabinLight";
+        cabinLight.position.set(runtime.activeBuilding.x + 9.4, 2.9, runtime.activeBuilding.z + 10.2);
+        cabinLight.userData.voxcelElevatorOnly = true;
+        scene.add(cabinLight);
+      }
+      return scene;
+    }
+
+    function attachElevatorCabinToScene() {
+      const cabin = runtime.officeElevatorVisual?.cabin;
+      if (!cabin || !runtime.elevatorScene) return false;
+      cabin.removeFromParent();
+      runtime.elevatorScene.add(cabin);
+      return true;
+    }
+
+    function enterElevatorScene() {
+      if (runtime.activeBuilding?.id !== "office" || runtime.elevatorSceneActive) return false;
+      if (!runtime.officeElevatorVisual?.cabin) return false;
+      runtime.elevatorScene = createElevatorScene();
+      attachElevatorCabinToScene();
+      runtime.elevatorReturnPosition = {
+        x: playerRoot.position.x,
+        y: playerRoot.position.y,
+        z: playerRoot.position.z,
+      };
+      runtime.elevatorScene.add(playerRoot);
+      runtime.elevatorScene.add(playerShadow);
+      shiftPlayerTo(runtime.activeBuilding.x + 9.4, runtime.activeBuilding.z + 9.55);
+      handle.scene = runtime.elevatorScene;
+      runtime.activeScene = runtime.elevatorScene;
+      runtime.elevatorSceneActive = true;
+      runtime.elevatorPhase = "inside";
+      runtime.lastSceneKey = "office-elevator";
+      runtime.sceneSwitches += 1;
+      runtime.acceptNextMove = true;
+      playSceneTransition();
+      refreshColliderRegistry(performance.now(), true);
+      handle.notify?.("🛗 エレベーター内に入りました");
+      return true;
+    }
+
+    function exitElevatorScene() {
+      if (!runtime.elevatorSceneActive || !runtime.elevatorScene) return false;
+      const building = runtime.activeBuilding;
+      const cabin = runtime.officeElevatorVisual?.cabin;
+      cabin?.removeFromParent();
+      if (runtime.interiorFixtureRoot && cabin) runtime.interiorFixtureRoot.add(cabin);
+      runtime.interiorScene?.add(playerRoot);
+      runtime.interiorScene?.add(playerShadow);
+      const exitX = building?.x + 9.4;
+      const exitZ = building?.z + 11.75;
+      if (Number.isFinite(exitX) && Number.isFinite(exitZ)) shiftPlayerTo(exitX, exitZ);
+      runtime.elevatorScene.remove(playerRoot);
+      runtime.elevatorScene.remove(playerShadow);
+      runtime.elevatorScene.clear();
+      runtime.elevatorScene = null;
+      runtime.elevatorSceneActive = false;
+      runtime.elevatorPhase = "lobby";
+      handle.scene = runtime.interiorScene;
+      runtime.activeScene = runtime.interiorScene;
+      runtime.lastSceneKey = `interior:${building?.id || "office"}`;
+      runtime.sceneSwitches += 1;
+      runtime.acceptNextMove = true;
+      refreshColliderRegistry(performance.now(), true);
+      playSceneTransition();
+      handle.notify?.("エレベーターを降りました");
+      return true;
+    }
+
     function updateOfficeElevator(now) {
       const visual = runtime.officeElevatorVisual;
       if (!visual) return;
@@ -2547,6 +2659,40 @@
         visual.displayTexture && (visual.displayTexture.needsUpdate = true);
         visual.lastDisplayPhase = visual.displayPhase;
       }
+      if (runtime.elevatorSceneActive) {
+        confineElevatorPlayer();
+        updateElevatorCamera();
+      }
+    }
+
+    function confineElevatorPlayer() {
+      if (!runtime.activeBuilding) return;
+      const centerX = runtime.activeBuilding.x + 9.4;
+      const centerZ = runtime.activeBuilding.z + 10.2;
+      const nextX = Math.max(centerX - 1.72, Math.min(centerX + 1.72, playerRoot.position.x));
+      const nextZ = Math.max(centerZ - 1.2, Math.min(centerZ + 1.2, playerRoot.position.z));
+      const correctionX = nextX - playerRoot.position.x;
+      const correctionZ = nextZ - playerRoot.position.z;
+      if (Math.abs(correctionX) < 0.0001 && Math.abs(correctionZ) < 0.0001) return;
+      playerRoot.position.x = nextX;
+      playerRoot.position.z = nextZ;
+      playerShadow.position.x += correctionX;
+      playerShadow.position.z += correctionZ;
+      camera.position.x += correctionX;
+      camera.position.z += correctionZ;
+      runtime.blockedMoves += 1;
+      runtime.lastPosition.copy(playerRoot.position);
+    }
+
+    function updateElevatorCamera() {
+      const horizontalX = camera.position.x - playerRoot.position.x;
+      const horizontalZ = camera.position.z - playerRoot.position.z;
+      const length = Math.hypot(horizontalX, horizontalZ) || 1;
+      const distance = 2.35;
+      camera.position.x = playerRoot.position.x + (horizontalX / length) * distance;
+      camera.position.z = playerRoot.position.z + (horizontalZ / length) * distance;
+      camera.position.y = playerRoot.position.y + 1.65;
+      camera.lookAt(playerRoot.position.x, playerRoot.position.y + 1.35, playerRoot.position.z + 0.5);
     }
 
 
@@ -2594,6 +2740,8 @@
         return true;
       }
 
+      const wasInsideElevator = runtime.elevatorSceneActive;
+      if (wasInsideElevator) runtime.officeElevatorVisual?.cabin?.removeFromParent();
       clearOfficeFloorFixtures();
       runtime.officeFloor = floor;
       runtime.officeFloorVariant = officeFloorVariant(floor);
@@ -2605,7 +2753,12 @@
         floor,
       );
       setOfficeExitAvailability(floor);
-      movePlayerNearOfficeElevator();
+      if (wasInsideElevator) {
+        attachElevatorCabinToScene();
+        runtime.elevatorPhase = "inside";
+      } else {
+        movePlayerNearOfficeElevator();
+      }
       playSceneTransition();
       refreshColliderRegistry(performance.now(), true);
       handle.notify?.(`🛗 シティオフィスタワー ${floor}階`);
@@ -2717,6 +2870,7 @@
 
     function exitInterior() {
       if (!runtime.interiorScene) return;
+      if (runtime.elevatorSceneActive) exitElevatorScene();
       const building = runtime.activeBuilding;
       const original = runtime.originalBuildingDimensions;
       if (building && original) {
@@ -2791,6 +2945,7 @@
         ? buildings.find((candidate) => candidate.id === buildingState.id) || buildingState
         : null;
 
+      if (runtime.elevatorSceneActive) return;
       if (building && runtime.activeBuilding?.id !== building.id) {
         if (runtime.interiorScene) exitInterior();
         enterInterior(building);
@@ -2815,7 +2970,7 @@
     };
 
     function updateInteriorShell() {
-      if (!runtime.activeBuilding || !runtime.shellSides) return;
+      if (!runtime.activeBuilding || !runtime.shellSides || runtime.elevatorSceneActive) return;
       for (const side of Object.values(runtime.shellSides)) side.visible = true;
       const building = runtime.activeBuilding;
       const room = runtime.roomDimensions || { width: building.w, depth: building.d };
@@ -2878,7 +3033,9 @@
       runtime.lastColliderRefresh = now;
       runtime.colliderNodes.clear();
       runtime.colliderNodesByScene.clear();
-      const scenes = runtime.interiorScene ? [cityScene, runtime.interiorScene] : [cityScene];
+      const scenes = runtime.elevatorScene
+        ? [cityScene, runtime.interiorScene, runtime.elevatorScene]
+        : runtime.interiorScene ? [cityScene, runtime.interiorScene] : [cityScene];
       for (const scene of scenes) {
         const sceneNodes = new Set();
         scene.traverse((object) => {
@@ -2991,7 +3148,9 @@
       refreshColliderRegistry(now);
       const position = playerRoot.position;
       const last = runtime.lastPosition;
-      const sceneKey = runtime.activeBuilding ? `interior:${runtime.activeBuilding.id}` : "city";
+      const sceneKey = runtime.elevatorSceneActive
+        ? "office-elevator"
+        : runtime.activeBuilding ? `interior:${runtime.activeBuilding.id}` : "city";
 
       if (
         runtime.acceptNextMove ||
@@ -3187,8 +3346,10 @@
       runtime.legacySurfaceCount = countLegacyRoomSurfaces();
       return {
         ready: runtime.ready,
-        activeScene: runtime.activeBuilding ? "interior" : "city",
+        activeScene: runtime.elevatorSceneActive ? "elevator" : runtime.activeBuilding ? "interior" : "city",
         sceneName: runtime.activeScene?.name || "city",
+        elevatorSceneActive: runtime.elevatorSceneActive,
+        elevatorPhase: runtime.elevatorPhase,
         buildingId: runtime.activeBuilding?.id || null,
         usingDedicatedScene: runtime.activeScene !== cityScene,
         movedObjectCount: runtime.movedObjects.size,
@@ -3315,6 +3476,8 @@
       refreshColliders: () => refreshColliderRegistry(performance.now(), true),
       setOfficeFloor,
       setElevatorState,
+      enterElevatorScene,
+      exitElevatorScene,
       handleInteraction(action) {
         if (action !== "office-elevator" || runtime.activeBuilding?.id !== "office") return false;
         return Boolean(window.__voxcelOffice?.openElevator?.());
