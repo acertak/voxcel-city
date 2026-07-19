@@ -3,9 +3,10 @@
 
   if (window.__voxcelStreetscape?.ready) return;
 
-  const SYSTEM_VERSION = 2;
+  const SYSTEM_VERSION = 3;
   const SIGN_LIFT = 0.35;
   const STOP_LINE_OFFSET = 10.2;
+  const LANE_CENTER_OFFSET = 2;
   const CROSSWALK_CENTER_OFFSET = 6;
   const CROSSWALK_DEPTH = 5.8;
   const STOP_LINE_DEPTH = 0.2;
@@ -158,10 +159,16 @@
       const size = geometrySize(object);
       if (size.width > size.height) {
         const centerZ = nearest(object.position.z, ROAD_CENTERLINES.z);
-        object.position.z = centerZ + Math.sign(object.position.z - centerZ) * STOP_LINE_OFFSET;
+        const centerX = nearest(object.position.x, ROAD_CENTERLINES.x);
+        const approachSide = Math.sign(object.position.z - centerZ);
+        object.position.x = centerX - approachSide * LANE_CENTER_OFFSET;
+        object.position.z = centerZ + approachSide * STOP_LINE_OFFSET;
       } else {
         const centerX = nearest(object.position.x, ROAD_CENTERLINES.x);
-        object.position.x = centerX + Math.sign(object.position.x - centerX) * STOP_LINE_OFFSET;
+        const centerZ = nearest(object.position.z, ROAD_CENTERLINES.z);
+        const approachSide = Math.sign(object.position.x - centerX);
+        object.position.x = centerX + approachSide * STOP_LINE_OFFSET;
+        object.position.z = centerZ - approachSide * LANE_CENTER_OFFSET;
       }
       object.name = `StreetStopLine:${state.stopLineCount}`;
       object.userData ||= {};
@@ -172,11 +179,14 @@
 
     for (const stopLine of handle?.stopLines || []) {
       const center = parseIntersectionCenter(stopLine.intersectionId);
-      if (!center) continue;
+      const direction = Math.sign(Number(stopLine.dir));
+      if (!center || !direction) continue;
       if (stopLine.axis === "ns") {
-        stopLine.z = center.z + Math.sign(stopLine.z - center.z) * STOP_LINE_OFFSET;
+        stopLine.x = center.x + direction * LANE_CENTER_OFFSET;
+        stopLine.z = center.z - direction * STOP_LINE_OFFSET;
       } else if (stopLine.axis === "ew") {
-        stopLine.x = center.x + Math.sign(stopLine.x - center.x) * STOP_LINE_OFFSET;
+        stopLine.x = center.x - direction * STOP_LINE_OFFSET;
+        stopLine.z = center.z + direction * LANE_CENTER_OFFSET;
       }
     }
   }
@@ -200,6 +210,7 @@
         crosswalkCenterOffset: CROSSWALK_CENTER_OFFSET,
         crosswalkOuterOffset,
         stopLineOffset: STOP_LINE_OFFSET,
+        laneCenterOffset: LANE_CENTER_OFFSET,
         stopLineInnerOffset,
         minimumGap: Number((stopLineInnerOffset - crosswalkOuterOffset).toFixed(3)),
       },
