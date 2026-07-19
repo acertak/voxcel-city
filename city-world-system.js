@@ -11,6 +11,15 @@
   const OFFICE_SIZE = Object.freeze({ width: 22, depth: 18 });
   const OFFICE_HEIGHT = 4.8 + OFFICE_FLOORS * OFFICE_FLOOR_HEIGHT;
   const INTERACTION_DISTANCE = 3.15;
+  const OFFICE_ELEVATOR_LAYOUT = Object.freeze({
+    centerX: 9.4,
+    callPanelX: 10.7,
+    callPanelY: 1.38,
+    callPanelZ: 12.265,
+    boardingThresholdZ: 11.58,
+    boardingLimitZ: 12.24,
+    doorwayHalfWidth: 0.62,
+  });
 
   const RESIDENCE_PLANS = Object.freeze([
     { from: [-60, -50], to: [-60, -50] },
@@ -32,6 +41,7 @@
     elevatorDoorsOpen: false,
     elevatorCabinEntered: false,
     elevatorTargetFloor: null,
+    elevatorBoardingArmed: false,
     movedResidenceCount: 0,
     movedResidenceObjectCount: 0,
     clearedTreeCount: 0,
@@ -53,6 +63,12 @@
   let lastModalOpenAt = 0;
   let elevatorArrivalTimer = null;
   let elevatorOperationGeneration = 0;
+  let elevatorCallControls = null;
+  let elevatorCallUpButton = null;
+  let elevatorCallDownButton = null;
+  let elevatorFrameRetryTimer = null;
+  let unregisterElevatorFrame = null;
+  let boardingTransitionPending = false;
   let pollingTimer = null;
   const movedResidenceObjects = new Set();
   const ownedGeometries = new Set();
@@ -682,10 +698,16 @@
       .office-elevator-action.primary{border-color:rgba(255,214,102,.52);background:linear-gradient(180deg,rgba(190,143,53,.34),rgba(73,50,19,.82));color:#fff0b6}
       .office-elevator-floor-label{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:10px;opacity:.72}
       .office-floor-button.destination{border-color:rgba(128,224,161,.35)}
+      .office-elevator-world-controls{position:fixed;left:50%;top:55%;z-index:90;display:flex;flex-direction:column;gap:5px;transform:translate(-50%,-50%);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .14s ease,visibility .14s ease;filter:drop-shadow(0 5px 12px rgba(0,0,0,.62))}
+      .office-elevator-world-controls.visible{opacity:1;visibility:visible}
+      .office-elevator-world-button{width:42px;height:42px;border:1px solid rgba(190,231,243,.72);border-radius:50%;background:radial-gradient(circle at 36% 28%,rgba(190,231,243,.34),rgba(12,25,31,.94) 66%);color:#e9fbff;font:900 18px/1 system-ui;pointer-events:auto;cursor:pointer;touch-action:manipulation;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06),0 0 0 1px rgba(0,0,0,.68)}
+      .office-elevator-world-button:hover,.office-elevator-world-button:focus-visible{border-color:#e9fbff;background:radial-gradient(circle at 36% 28%,rgba(225,249,255,.52),rgba(20,48,58,.96) 68%);outline:2px solid rgba(112,212,255,.45);outline-offset:2px}
+      .office-elevator-world-button:active{transform:scale(.9);background:#2d6c7d}
+      .office-elevator-world-button:disabled{opacity:.24;cursor:not-allowed;filter:saturate(.25)}
       body.voxcel-elevator-scene-console .mo{align-items:flex-end;justify-content:flex-end;padding:14px;background:rgba(0,0,0,.08);backdrop-filter:none;-webkit-backdrop-filter:none;pointer-events:none}
       body.voxcel-elevator-scene-console .mo .md{width:min(370px,calc(100vw - 28px));max-height:min(58vh,520px);margin:0;pointer-events:auto;background:rgba(7,14,20,.94);border-color:rgba(111,212,255,.42);box-shadow:0 16px 48px rgba(0,0,0,.48)}
       @keyframes office-elevator-pulse{from{transform:scale(.82);opacity:.58}to{transform:scale(1.16);opacity:1}}
-      @media(max-width:420px){.office-floor-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.office-floor-button{min-height:38px;font-size:10px}}
+      @media(max-width:420px){.office-floor-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.office-floor-button{min-height:38px;font-size:10px}.office-elevator-world-button{width:46px;height:46px;font-size:20px}}
     `;
     document.head.appendChild(style);
   }
@@ -718,6 +740,164 @@
     ) <= distance;
   }
 
+  function updateElevatorInteractionLabel() {
+    if (!elevatorPoint) return;
+    elevatorPoint.officeFloor = state.currentFloor;
+    if (isElevatorSceneActive()) {
+      elevatorPoint.label = "🛗 行き先操作盤";
+      return;
+    }
+    switch (state.elevatorMode) {
+      case "arriving":
+        elevatorPoint.label = "🛗 エレベーター呼び出し中";
+        break;
+      case "opening":
+      case "arrived":
+        elevatorPoint.label = "🚶 扉の中央へ進んで乗る";
+        break;
+      default:
+        elevatorPoint.label = state.currentFloor === 1
+          ? "▲ 上へ呼ぶ"
+          : state.currentFloor === OFFICE_FLOORS
+            ? "▼ 下へ呼ぶ"
+            : "▲ / ▼ エレベーターを呼ぶ";
+        break;
+    }
+  }
+
+  function createElevatorCallControls() {
+    if (elevatorCallControls) return elevatorCallControls;
+    const controls = document.createElement("div");
+    controls.id = "officeElevatorCallControls";
+    controls.className = "office-elevator-world-controls";
+    controls.setAttribute("role", "group");
+    controls.setAttribute("aria-label", "エレベーター呼び出しボタン");
+    controls.setAttribute("aria-hidden", "true");
+
+    const createButton = (direction, symbol, label) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "office-elevator-world-button";
+      button.textContent = symbol;
+      button.setAttribute("aria-label", label);
+      button.dataset.direction = direction;
+      button.addEventListener("pointerdown", (event) => event.stopPropagation());
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        callElevator(direction);
+      });
+      return button;
+    };
+
+    elevatorCallUpButton = createButton("up", "▲", "▲ 上へ呼ぶ");
+    elevatorCallDownButton = createButton("down", "▼", "▼ 下へ呼ぶ");
+    controls.append(elevatorCallUpButton, elevatorCallDownButton);
+    document.body.appendChild(controls);
+    elevatorCallControls = controls;
+    return controls;
+  }
+
+  function hideElevatorCallControls() {
+    if (elevatorCallControls?.contains(document.activeElement)) document.activeElement?.blur?.();
+    elevatorCallControls?.classList.remove("visible");
+    elevatorCallControls?.setAttribute("aria-hidden", "true");
+  }
+
+  function updateElevatorCallControls() {
+    const controls = createElevatorCallControls();
+    const player = runtime?.playerRoot?.position;
+    const camera = runtime?.camera;
+    const canCall = state.elevatorMode === "idle" || state.elevatorMode === "call";
+    if (
+      !isInsideOffice() ||
+      isElevatorSceneActive() ||
+      !officeBuilding ||
+      !player ||
+      !camera ||
+      !canCall ||
+      state.floorChangePending ||
+      modalOverlay?.classList.contains("show")
+    ) {
+      hideElevatorCallControls();
+      return;
+    }
+
+    const panelX = officeBuilding.x + OFFICE_ELEVATOR_LAYOUT.callPanelX;
+    const panelZ = officeBuilding.z + OFFICE_ELEVATOR_LAYOUT.callPanelZ;
+    if (Math.hypot(player.x - panelX, player.z - panelZ) > 3.35) {
+      hideElevatorCallControls();
+      return;
+    }
+
+    const projected = player.clone();
+    projected.set(panelX, OFFICE_ELEVATOR_LAYOUT.callPanelY, panelZ).project(camera);
+    if (
+      projected.z < -1 || projected.z > 1 ||
+      projected.x < -1.08 || projected.x > 1.08 ||
+      projected.y < -1.08 || projected.y > 1.08
+    ) {
+      hideElevatorCallControls();
+      return;
+    }
+
+    const screenX = (projected.x * 0.5 + 0.5) * window.innerWidth;
+    const screenY = (-projected.y * 0.5 + 0.5) * window.innerHeight;
+    controls.style.left = `${Math.max(30, Math.min(window.innerWidth - 30, screenX))}px`;
+    controls.style.top = `${Math.max(58, Math.min(window.innerHeight - 86, screenY))}px`;
+    elevatorCallUpButton.disabled = state.currentFloor >= OFFICE_FLOORS;
+    elevatorCallDownButton.disabled = state.currentFloor <= 1;
+    controls.classList.add("visible");
+    controls.setAttribute("aria-hidden", "false");
+  }
+
+  function tryNaturalElevatorBoarding() {
+    if (
+      boardingTransitionPending ||
+      !state.elevatorBoardingArmed ||
+      state.elevatorMode !== "arrived" ||
+      !state.elevatorDoorsOpen ||
+      !isInsideOffice() ||
+      isElevatorSceneActive() ||
+      !officeBuilding ||
+      !runtime?.playerRoot?.position
+    ) {
+      return false;
+    }
+    const doorProgress = window.__voxcelEnhancements?.getElevatorDoorProgress?.() ?? 1;
+    if (doorProgress < 0.82) return false;
+
+    const player = runtime.playerRoot.position;
+    const localX = player.x - officeBuilding.x;
+    const localZ = player.z - officeBuilding.z;
+    if (
+      Math.abs(localX - OFFICE_ELEVATOR_LAYOUT.centerX) > OFFICE_ELEVATOR_LAYOUT.doorwayHalfWidth ||
+      localZ < OFFICE_ELEVATOR_LAYOUT.boardingThresholdZ ||
+      localZ > OFFICE_ELEVATOR_LAYOUT.boardingLimitZ
+    ) {
+      return false;
+    }
+    return enterElevator();
+  }
+
+  function updateNaturalElevatorExperience() {
+    updateElevatorCallControls();
+    tryNaturalElevatorBoarding();
+  }
+
+  function registerElevatorFrameWatcher() {
+    if (unregisterElevatorFrame || state.reason === "destroyed") return;
+    const enhancements = window.__voxcelEnhancements;
+    if (typeof enhancements?.registerBeforeRender !== "function") {
+      window.clearTimeout(elevatorFrameRetryTimer);
+      elevatorFrameRetryTimer = window.setTimeout(registerElevatorFrameWatcher, 50);
+      return;
+    }
+    window.clearTimeout(elevatorFrameRetryTimer);
+    elevatorFrameRetryTimer = null;
+    unregisterElevatorFrame = enhancements.registerBeforeRender(updateNaturalElevatorExperience);
+  }
+
   function syncCurrentFloorFromEnhancements() {
     const enhancementState = window.__voxcelEnhancements?.getState?.();
     const candidate = (
@@ -728,10 +908,7 @@
     if (Number.isInteger(candidate) && candidate >= 1 && candidate <= OFFICE_FLOORS) {
       state.currentFloor = candidate;
       if (officeBuilding) officeBuilding.currentFloor = candidate;
-      if (elevatorPoint) {
-        elevatorPoint.officeFloor = candidate;
-        elevatorPoint.label = `🛗 エレベーター（${candidate}F）`;
-      }
+      updateElevatorInteractionLabel();
     }
   }
 
@@ -770,41 +947,59 @@
     if (Object.prototype.hasOwnProperty.call(options, "targetFloor")) {
       state.elevatorTargetFloor = options.targetFloor;
     }
+    updateElevatorInteractionLabel();
     syncElevatorVisual();
   }
 
   function callElevator(direction) {
     if (!isInsideOffice() || state.floorChangePending) return false;
+    if (direction !== "up" && direction !== "down") return false;
+    if (state.elevatorMode === "idle") {
+      setElevatorMode("call", {
+        direction: null,
+        doorsOpen: false,
+        cabinEntered: false,
+        targetFloor: null,
+      });
+    }
     if (state.elevatorMode !== "call") return false;
     if (direction === "up" && state.currentFloor >= OFFICE_FLOORS) return false;
     if (direction === "down" && state.currentFloor <= 1) return false;
     clearElevatorArrivalTimer();
+    state.elevatorBoardingArmed = true;
+    boardingTransitionPending = false;
     setElevatorMode("arriving", { direction, doorsOpen: false, cabinEntered: false });
-    renderElevatorModal();
+    hideElevatorCallControls();
+    runtime?.notify?.(direction === "up" ? "▲ 上方向へ呼び出しました" : "▼ 下方向へ呼び出しました");
     elevatorArrivalTimer = window.setTimeout(() => {
       if (!isInsideOffice()) {
         elevatorArrivalTimer = null;
+        state.elevatorBoardingArmed = false;
         setElevatorMode("idle", { doorsOpen: false, cabinEntered: false, targetFloor: null });
         return;
       }
       setElevatorMode("opening", { doorsOpen: true, cabinEntered: false });
       runtime?.notify?.("🔔 エレベーターが到着しました。扉が開きます");
-      if (state.modalOpen) renderElevatorModal();
       elevatorArrivalTimer = window.setTimeout(() => {
         elevatorArrivalTimer = null;
         if (!isInsideOffice()) {
+          state.elevatorBoardingArmed = false;
           setElevatorMode("idle", { doorsOpen: false, cabinEntered: false, targetFloor: null });
           return;
         }
         setElevatorMode("arrived", { doorsOpen: true, cabinEntered: false });
-        if (state.modalOpen) renderElevatorModal();
+        runtime?.notify?.("🚶 扉の中央へ進むと乗り込めます");
       }, 520);
     }, 650);
     return true;
   }
 
   function isElevatorSceneActive() {
-    return Boolean(window.__voxcelEnhancements?.getState?.().elevatorSceneActive);
+    const enhancements = window.__voxcelEnhancements;
+    if (typeof enhancements?.isElevatorSceneActive === "function") {
+      return Boolean(enhancements.isElevatorSceneActive());
+    }
+    return Boolean(enhancements?.getState?.().elevatorSceneActive);
   }
 
   function hideElevatorModal() {
@@ -815,14 +1010,26 @@
   }
 
   function enterElevator() {
-    if (state.elevatorMode !== "arrived") return false;
+    if (
+      boardingTransitionPending ||
+      !state.elevatorBoardingArmed ||
+      state.elevatorMode !== "arrived" ||
+      !state.elevatorDoorsOpen
+    ) {
+      return false;
+    }
+    boardingTransitionPending = true;
     const sceneResult = window.__voxcelEnhancements?.enterElevatorScene?.();
     if (sceneResult === false) {
+      boardingTransitionPending = false;
       runtime?.notify?.("エレベーターに乗り込めませんでした");
       return false;
     }
+    state.elevatorBoardingArmed = false;
     setElevatorMode("inside-open", { doorsOpen: true, cabinEntered: true });
     hideElevatorModal();
+    hideElevatorCallControls();
+    boardingTransitionPending = false;
     runtime?.notify?.("エレベーターに乗り込みました");
     window.setTimeout(() => {
       if (isElevatorSceneActive() && state.elevatorMode === "inside-open" && !state.modalOpen) {
@@ -843,6 +1050,8 @@
   function leaveElevator() {
     if (state.elevatorMode !== "arrived" || !isElevatorSceneActive()) return false;
     window.__voxcelEnhancements?.exitElevatorScene?.();
+    state.elevatorBoardingArmed = false;
+    boardingTransitionPending = false;
     setElevatorMode("call", {
       direction: null,
       doorsOpen: false,
@@ -868,9 +1077,8 @@
   }
 
   function renderElevatorModal() {
-    if (!modalContent) return;
+    if (!modalContent || !isElevatorSceneActive()) return false;
     syncCurrentFloorFromEnhancements();
-    const cabinScene = isElevatorSceneActive();
     modalContent.replaceChildren();
     modalContent.dataset.officeElevator = "true";
 
@@ -882,22 +1090,18 @@
     current.className = "office-elevator-current";
     current.textContent = `現在 ${state.currentFloor}F`;
     headingRow.append(heading, current);
-    if (cabinScene) {
-      headingRow.style.paddingRight = "26px";
-      const panelCloseButton = document.createElement("button");
-      panelCloseButton.type = "button";
-      panelCloseButton.className = "office-elevator-panel-close";
-      panelCloseButton.textContent = "×";
-      panelCloseButton.setAttribute("aria-label", "操作盤を閉じる");
-      panelCloseButton.addEventListener("click", hideElevatorModal);
-      headingRow.appendChild(panelCloseButton);
-    }
+    headingRow.style.paddingRight = "26px";
+    const panelCloseButton = document.createElement("button");
+    panelCloseButton.type = "button";
+    panelCloseButton.className = "office-elevator-panel-close";
+    panelCloseButton.textContent = "×";
+    panelCloseButton.setAttribute("aria-label", "操作盤を閉じる");
+    panelCloseButton.addEventListener("click", hideElevatorModal);
+    headingRow.appendChild(panelCloseButton);
 
     const note = document.createElement("p");
     note.className = "office-elevator-note";
-    note.textContent = cabinScene
-      ? "行き先階を押してください。扉が開いている場合は、選択後に自動で閉まります。"
-      : "上下ボタンで呼び出し、到着して扉が開いてから乗り込みます。";
+    note.textContent = "行き先階を押してください。扉が開いている場合は、選択後に自動で閉まります。";
 
     const status = statusForElevator();
     const statusBox = document.createElement("div");
@@ -909,31 +1113,14 @@
     statusText.textContent = status.text;
     statusBox.append(statusDot, statusText);
 
-    const callActions = document.createElement("div");
-    callActions.className = "office-elevator-call-actions";
-    const upButton = document.createElement("button");
-    upButton.type = "button";
-    upButton.className = "office-elevator-action";
-    upButton.textContent = "▲ 上へ呼ぶ";
-    upButton.disabled = state.elevatorMode !== "call" || state.currentFloor >= OFFICE_FLOORS;
-    upButton.addEventListener("click", () => callElevator("up"));
-    const downButton = document.createElement("button");
-    downButton.type = "button";
-    downButton.className = "office-elevator-action";
-    downButton.textContent = "▼ 下へ呼ぶ";
-    downButton.disabled = state.elevatorMode !== "call" || state.currentFloor <= 1;
-    downButton.addEventListener("click", () => callElevator("down"));
-    callActions.append(upButton, downButton);
-
     const cabinActions = document.createElement("div");
     cabinActions.className = "office-elevator-cabin-actions";
-    if (state.elevatorMode === "arrived") {
+    if (state.elevatorMode === "arrived" && state.elevatorTargetFloor !== null) {
       const enterButton = document.createElement("button");
       enterButton.type = "button";
       enterButton.className = "office-elevator-action primary";
-      const arrivingAtDestination = cabinScene && state.elevatorTargetFloor !== null;
-      enterButton.textContent = arrivingAtDestination ? "扉が開く・降りる" : "扉が開く・乗り込む";
-      enterButton.addEventListener("click", arrivingAtDestination ? leaveElevator : enterElevator);
+      enterButton.textContent = "扉が開く・降りる";
+      enterButton.addEventListener("click", leaveElevator);
       cabinActions.appendChild(enterButton);
     } else if (state.elevatorMode === "inside-open") {
       const closeDoorsButton = document.createElement("button");
@@ -962,7 +1149,7 @@
     grid.className = "office-floor-grid";
     grid.setAttribute("role", "group");
     grid.setAttribute("aria-label", "行き先の階");
-    const canChooseDestination = cabinScene && (
+    const canChooseDestination = (
       state.elevatorMode === "inside-open" || state.elevatorMode === "inside-closed"
     ) && !state.floorChangePending;
     for (let floor = 1; floor <= OFFICE_FLOORS; floor += 1) {
@@ -992,32 +1179,36 @@
     });
     actions.appendChild(closeButton);
 
-    const sections = [headingRow, note, statusBox];
-    if (cabinScene) {
-      sections.push(cabinActions, floorLabel, grid);
-    } else {
-      sections.push(callActions, cabinActions);
-    }
+    const sections = [headingRow, note, statusBox, cabinActions, floorLabel, grid];
     sections.push(actions);
     modalContent.append(...sections);
+    return true;
   }
 
   function openElevator(options = {}) {
     if (!options.force && !isNearElevator()) return false;
+    if (!isElevatorSceneActive()) {
+      hideElevatorModal();
+      if (state.elevatorMode === "idle" || state.elevatorMode === "call") {
+        if (state.currentFloor === 1) return callElevator("up");
+        if (state.currentFloor === OFFICE_FLOORS) return callElevator("down");
+        runtime?.notify?.("実物の▲ / ▼ボタンで方向を選んでください");
+        updateElevatorCallControls();
+        return true;
+      }
+      if (state.elevatorMode === "arriving") {
+        runtime?.notify?.("エレベーターを呼び出しています…");
+      } else if (state.elevatorMode === "opening" || state.elevatorMode === "arrived") {
+        runtime?.notify?.("扉の中央へ進むと乗り込めます");
+      }
+      return true;
+    }
     if (!modalOverlay || !modalContent) return false;
     const now = performance.now();
     if (state.modalOpen && now - lastModalOpenAt < 250) return true;
     lastModalOpenAt = now;
     state.modalOpen = true;
-    if (!isElevatorSceneActive() && state.elevatorMode === "idle") {
-      setElevatorMode("call", {
-        direction: null,
-        doorsOpen: false,
-        cabinEntered: false,
-        targetFloor: null,
-      });
-    }
-    renderElevatorModal();
+    if (!renderElevatorModal()) return false;
     modalOverlay.classList.add("show");
     modalOverlay.setAttribute("aria-label", "オフィス・エレベーター");
     document.body.classList.toggle("voxcel-elevator-scene-console", isElevatorSceneActive());
@@ -1195,7 +1386,10 @@
     elevatorOperationGeneration += 1;
     state.floorChangePending = false;
     state.elevatorDirection = null;
+    state.elevatorBoardingArmed = false;
+    boardingTransitionPending = false;
     hideElevatorModal();
+    hideElevatorCallControls();
     syncCurrentFloorFromEnhancements();
     setElevatorMode("idle", {
       direction: null,
@@ -1218,6 +1412,8 @@
     modalOverlay = document.getElementById("mO");
     modalContent = document.getElementById("mC");
     interactionButton = document.getElementById("iBtn");
+    createElevatorCallControls();
+    registerElevatorFrameWatcher();
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("voxcel:office-floor-changed", syncCurrentFloorFromEnhancements);
     window.addEventListener("voxcel:interior-entered", onInteriorEntered);
@@ -1242,7 +1438,10 @@
         doorsOpen: state.elevatorDoorsOpen,
         cabinEntered: state.elevatorCabinEntered,
         targetFloor: state.elevatorTargetFloor,
+        boardingArmed: state.elevatorBoardingArmed,
+        boardingTransitionPending,
       },
+      callControlsVisible: Boolean(elevatorCallControls?.classList.contains("visible")),
       modalOpen: Boolean(
         state.modalOpen &&
         modalOverlay?.classList.contains("show") &&
@@ -1295,6 +1494,10 @@
 
   function destroy() {
     clearElevatorArrivalTimer();
+    window.clearTimeout(elevatorFrameRetryTimer);
+    elevatorFrameRetryTimer = null;
+    unregisterElevatorFrame?.();
+    unregisterElevatorFrame = null;
     closeElevator();
     if (isInsideOffice()) runtime?.exitBuilding?.();
     window.removeEventListener("keydown", onKeyDown);
@@ -1304,6 +1507,10 @@
     interactionButton?.removeEventListener("click", onInteractionButton);
     interactionButton?.removeEventListener("touchend", onInteractionButton);
     modalOverlay?.removeEventListener("click", onModalBackdrop);
+    elevatorCallControls?.remove();
+    elevatorCallControls = null;
+    elevatorCallUpButton = null;
+    elevatorCallDownButton = null;
     const buildingIndex = runtime?.buildings?.indexOf(officeBuilding) ?? -1;
     if (buildingIndex >= 0) runtime.buildings.splice(buildingIndex, 1);
     const entranceIndex = runtime?.entrances?.indexOf(officeEntrance) ?? -1;

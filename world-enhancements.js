@@ -19,7 +19,7 @@
     doorWidth: 1.14,
     doorLeftX: 8.82,
     doorRightX: 9.98,
-    doorTravel: 1.18,
+    doorTravel: 1.35,
     playerZ: 14.28,
     cameraZ: 19.3,
     sceneZOffset: -8,
@@ -2079,8 +2079,8 @@
     function addOfficeElevatorBank(group, building, materials, floor) {
       const landingSegments = [
         [0.725, 5.4125],
-        [0.55, 8.1],
-        [0.55, 10.7],
+        [0.3, 8.1],
+        [0.3, 10.7],
         [0.725, 13.3875],
       ];
       for (const [width, x] of landingSegments) {
@@ -3726,6 +3726,8 @@
         return unregister;
       },
       refreshColliders: () => refreshColliderRegistry(performance.now(), true),
+      isElevatorSceneActive: () => runtime.elevatorSceneActive,
+      getElevatorDoorProgress: () => runtime.officeElevatorVisual?.doorProgress ?? 0,
       setOfficeFloor,
       setElevatorState,
       enterElevatorScene,

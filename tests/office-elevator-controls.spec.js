@@ -19,6 +19,7 @@ async function readElevatorState(page) {
       doorsOpen: office.elevatorState.doorsOpen,
       cabinEntered: office.elevatorState.cabinEntered,
       targetFloor: office.elevatorState.targetFloor,
+      boardingArmed: office.elevatorState.boardingArmed,
       currentFloor: office.currentFloor,
       doorProgress: elevatorVisual?.doorProgress ?? null,
       displayFloor: elevatorVisual?.displayFloor ?? null,
@@ -28,32 +29,84 @@ async function readElevatorState(page) {
   });
 }
 
+async function enterOfficeLobby(page) {
+  const office = await page.evaluate(() => window.__voxcelOffice.getState());
+  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), office.entrance);
+  await page.waitForTimeout(160);
+  await page.keyboard.press("e");
+  await expect.poll(async () => page.evaluate(() => (
+    window.__voxcelEnhancements.getState().buildingId
+  ))).toBe("office");
+  return office;
+}
+
+async function approachElevatorCallPanel(page) {
+  const elevator = await page.evaluate(() => window.__voxcelOffice.getState().elevator);
+  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), elevator);
+  await page.waitForTimeout(180);
+  await expect.poll(async () => page.evaluate(() => (
+    window.__voxcelOffice.getState().callControlsVisible
+  ))).toBe(true);
+  return elevator;
+}
+
+async function callElevatorUp(page) {
+  await page.getByRole("button", { name: "▲ 上へ呼ぶ", exact: true }).click();
+  await expect.poll(async () => readElevatorState(page)).toMatchObject({
+    mode: "arriving",
+    direction: "up",
+    doorsOpen: false,
+    boardingArmed: true,
+  });
+  await expect.poll(async () => readElevatorState(page), { timeout: 2_500 }).toMatchObject({
+    mode: "arrived",
+    doorsOpen: true,
+    cabinEntered: false,
+    boardingArmed: true,
+  });
+}
+
+async function walkIntoOpenElevator(page) {
+  await page.keyboard.down("w");
+  await page.waitForTimeout(420);
+  await page.keyboard.up("w");
+  await expect.poll(async () => page.evaluate(() => ({
+    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
+    activeScene: window.__voxcelEnhancements.getState().activeScene,
+  }))).toEqual({ scene: true, activeScene: "elevator" });
+}
+
+function touchPoint(id, x, y) {
+  return {
+    id,
+    x: Math.round(x),
+    y: Math.round(y),
+    radiusX: 1,
+    radiusY: 1,
+    rotationAngle: 0,
+    force: 1,
+  };
+}
+
+async function dispatchTouch(session, type, touchPoints) {
+  await session.send("Input.dispatchTouchEvent", { type, touchPoints });
+}
+
 test("operates the office elevator with call, doors, destination, and animated display", async ({ page }) => {
   test.setTimeout(45_000);
   await page.setViewportSize({ width: 390, height: 844 });
   await startGame(page);
-  const office = await page.evaluate(() => window.__voxcelOffice.getState());
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), {
-    x: office.entrance.x,
-    z: office.entrance.z,
-  });
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await expect.poll(async () => page.evaluate(() => window.__voxcelEnhancements.getState().buildingId)).toBe("office");
-
-  const elevator = await page.evaluate(() => window.__voxcelOffice.getState().elevator);
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), {
-    x: elevator.x,
-    z: elevator.z - 1.8,
-  });
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await expect(page.getByRole("button", { name: "▲ 上へ呼ぶ" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "▼ 下へ呼ぶ" })).toBeDisabled();
+  await enterOfficeLobby(page);
+  await approachElevatorCallPanel(page);
+  await expect(page.getByRole("button", { name: "▲ 上へ呼ぶ", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "▼ 下へ呼ぶ", exact: true })).toBeDisabled();
+  await expect(page.locator("#mO")).not.toHaveClass(/show/);
+  await expect(page.locator(".office-floor-button")).toHaveCount(0);
   await expect.poll(async () => readElevatorState(page)).toMatchObject({
-    mode: "call",
+    mode: "idle",
     doorsOpen: false,
     cabinEntered: false,
+    boardingArmed: false,
   });
   const lobbyVisual = await page.evaluate(() => (
     window.__voxcelEnhancements.getState().elevatorVisual
@@ -64,29 +117,17 @@ test("operates the office elevator with call, doors, destination, and animated d
   });
   const closedDoorProgress = lobbyVisual.doorProgress;
 
-  await page.getByRole("button", { name: "▲ 上へ呼ぶ" }).click();
-  await expect.poll(async () => readElevatorState(page)).toMatchObject({
-    mode: "arriving",
-    direction: "up",
-    doorsOpen: false,
-  });
-  await expect(page.getByText(/呼び出し中/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "扉が開く・乗り込む" })).toBeVisible({ timeout: 2_000 });
-  await expect.poll(async () => readElevatorState(page)).toMatchObject({
-    mode: "arrived",
-    doorsOpen: true,
-    cabinEntered: false,
-  });
+  await callElevatorUp(page);
+  await expect(page.locator("#mO")).not.toHaveClass(/show/);
+  await expect(page.getByRole("button", { name: "扉が開く・乗り込む" })).toHaveCount(0);
+  await page.waitForTimeout(180);
+  expect(await page.evaluate(() => window.__voxcelEnhancements.getState().elevatorSceneActive)).toBe(false);
   await expect.poll(async () => (await readElevatorState(page)).doorProgress).toBeGreaterThan(
     closedDoorProgress + 0.2,
   );
-  await expect.poll(async () => (await readElevatorState(page)).doorProgress).toBeGreaterThan(0.75);
+  await expect.poll(async () => (await readElevatorState(page)).doorProgress).toBeGreaterThan(0.82);
 
-  await page.getByRole("button", { name: "扉が開く・乗り込む" }).click();
-  await expect.poll(async () => page.evaluate(() => ({
-    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
-    activeScene: window.__voxcelEnhancements.getState().activeScene,
-  }))).toEqual({ scene: true, activeScene: "elevator" });
+  await walkIntoOpenElevator(page);
   await expect.poll(async () => readElevatorState(page)).toMatchObject({
     mode: "inside-open",
     doorsOpen: true,
@@ -96,9 +137,9 @@ test("operates the office elevator with call, doors, destination, and animated d
     x: window.__voxcelPlayer.playerRoot.position.x,
     z: window.__voxcelPlayer.playerRoot.position.z,
   }));
-  await page.keyboard.down("w");
+  await page.keyboard.down("s");
   await page.waitForTimeout(180);
-  await page.keyboard.up("w");
+  await page.keyboard.up("s");
   await page.waitForTimeout(60);
   const cabinWalk = await page.evaluate((before) => {
     const player = window.__voxcelPlayer.playerRoot.position;
@@ -207,21 +248,10 @@ test("operates the office elevator with call, doors, destination, and animated d
 
 test("resets a waiting elevator after leaving and re-entering the office", async ({ page }) => {
   await startGame(page);
-  const office = await page.evaluate(() => window.__voxcelOffice.getState());
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), office.entrance);
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await expect.poll(async () => page.evaluate(() => (
-    window.__voxcelEnhancements.getState().buildingId
-  ))).toBe("office");
-
-  const elevator = await page.evaluate(() => window.__voxcelOffice.getState().elevator);
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z - 1.8, Math.PI), elevator);
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await page.getByRole("button", { name: "▲ 上へ呼ぶ" }).click();
-  await page.getByRole("button", { name: "扉が開く・乗り込む" }).waitFor({ timeout: 2_000 });
-  await page.keyboard.press("Escape");
+  const office = await enterOfficeLobby(page);
+  await approachElevatorCallPanel(page);
+  await callElevatorUp(page);
+  await expect(page.locator("#mO")).not.toHaveClass(/show/);
 
   const exit = await page.evaluate(() => {
     const point = window.__voxcelPlayer.buildingViews.office.interiorPts
@@ -253,23 +283,10 @@ test("resets a waiting elevator after leaving and re-entering the office", async
 
 test("cancels an in-flight ride when the office lifecycle ends", async ({ page }) => {
   await startGame(page);
-  const office = await page.evaluate(() => window.__voxcelOffice.getState());
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), office.entrance);
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await expect.poll(async () => page.evaluate(() => (
-    window.__voxcelEnhancements.getState().buildingId
-  ))).toBe("office");
-
-  const elevator = await page.evaluate(() => window.__voxcelOffice.getState().elevator);
-  await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z - 1.8, Math.PI), elevator);
-  await page.waitForTimeout(160);
-  await page.keyboard.press("e");
-  await page.getByRole("button", { name: "▲ 上へ呼ぶ" }).click();
-  await page.getByRole("button", { name: "扉が開く・乗り込む" }).click({ timeout: 2_000 });
-  await expect.poll(async () => page.evaluate(() => (
-    window.__voxcelEnhancements.getState().elevatorSceneActive
-  ))).toBe(true);
+  await enterOfficeLobby(page);
+  await approachElevatorCallPanel(page);
+  await callElevatorUp(page);
+  await walkIntoOpenElevator(page);
 
   await page.getByRole("button", { name: "2階", exact: true }).click({ timeout: 2_000 });
   await expect.poll(async () => readElevatorState(page), { timeout: 5_000 }).toMatchObject({
@@ -302,5 +319,80 @@ test("cancels an in-flight ride when the office lifecycle ends", async ({ page }
     doorsOpen: false,
     scene: false,
     insideOffice: false,
+  });
+});
+
+test("boards when a low-frame-rate step stops just before the room boundary", async ({ page }) => {
+  await startGame(page);
+  const office = await enterOfficeLobby(page);
+  const elevator = await approachElevatorCallPanel(page);
+  await callElevatorUp(page);
+
+  await page.evaluate(({ x, z }) => {
+    window.__voxcelTest.setPlayer(x, z, Math.PI);
+  }, {
+    x: elevator.x,
+    z: office.office.z + 11.59,
+  });
+  await expect.poll(async () => page.evaluate(() => ({
+    scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
+    mode: window.__voxcelOffice.getState().elevatorState.mode,
+  }))).toEqual({ scene: true, mode: "inside-open" });
+});
+
+test.describe("mobile natural elevator boarding", () => {
+  test.use({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+
+  test("uses the interaction button and movement pad without opening the lobby modal", async ({ page }) => {
+    await startGame(page);
+    await enterOfficeLobby(page);
+    await approachElevatorCallPanel(page);
+    await expect(page.locator("#mO")).not.toHaveClass(/show/);
+    await page.locator("#iBtn").tap();
+    await expect.poll(async () => readElevatorState(page)).toMatchObject({
+      mode: "arriving",
+      direction: "up",
+      boardingArmed: true,
+    });
+    await expect(page.locator("#mO")).not.toHaveClass(/show/);
+    expect(await page.evaluate(() => window.__voxcelOffice.getState().modalOpen)).toBe(false);
+    await expect.poll(async () => readElevatorState(page), { timeout: 2_500 }).toMatchObject({
+      mode: "arrived",
+      doorsOpen: true,
+      boardingArmed: true,
+    });
+
+    const session = await page.context().newCDPSession(page);
+    const gesture = await page.evaluate(() => ({
+      startX: innerWidth * 0.25,
+      startY: innerHeight * 0.42,
+      forwardY: innerHeight * 0.42 - 90,
+    }));
+    const start = touchPoint(1, gesture.startX, gesture.startY);
+    const forward = touchPoint(1, gesture.startX, gesture.forwardY);
+    try {
+      await dispatchTouch(session, "touchStart", [start]);
+      await dispatchTouch(session, "touchMove", [forward]);
+      await expect.poll(async () => page.evaluate(() => (
+        window.__voxcelEnhancements.getState().elevatorSceneActive
+      ))).toBe(true);
+    } finally {
+      await dispatchTouch(session, "touchEnd", []);
+    }
+    await expect.poll(async () => readElevatorState(page)).toMatchObject({
+      mode: "inside-open",
+      cabinEntered: true,
+      boardingArmed: false,
+    });
+    await page.getByRole("button", { name: "2階", exact: true }).tap({ timeout: 2_500 });
+    await expect.poll(async () => readElevatorState(page)).toMatchObject({
+      mode: "moving",
+      doorsOpen: false,
+      targetFloor: 2,
+    });
   });
 });

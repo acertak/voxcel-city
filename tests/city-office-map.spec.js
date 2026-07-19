@@ -146,11 +146,10 @@ test.describe("50-floor office tower", () => {
     ]));
 
     const elevator = await page.evaluate(() => window.__voxcelOffice.getState().elevator);
-    await setPlayer(page, elevator.x, elevator.z - 1.8);
-    await page.keyboard.press("e");
-    await expect(page.getByRole("heading", { name: "🛗 オフィス・エレベーター" })).toBeVisible();
+    await setPlayer(page, elevator.x, elevator.z);
+    await expect(page.getByRole("button", { name: "▲ 上へ呼ぶ", exact: true })).toBeVisible();
+    await expect(page.locator("#mO")).not.toHaveClass(/show/);
     await expect(page.locator(".office-floor-button")).toHaveCount(0);
-    await page.keyboard.press("Escape");
     expect(await page.evaluate(() => window.__voxcelEnhancements.setOfficeFloor(25))).toBe(true);
 
     state = await page.evaluate(() => window.__voxcelEnhancements.getState());
@@ -188,7 +187,7 @@ test.describe("50-floor office tower", () => {
       result: true,
       officeFloor: 37,
       buildingFloor: 37,
-      elevatorLabel: "🛗 エレベーター（37F）",
+      elevatorLabel: "▲ / ▼ エレベーターを呼ぶ",
     });
 
     expect(await page.evaluate(() => window.__voxcelEnhancements.setOfficeFloor(50))).toBe(true);
