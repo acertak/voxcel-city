@@ -27,17 +27,24 @@ async function setPlayer(page, x, z, yaw = Math.PI) {
   await page.waitForTimeout(180);
 }
 
-async function enterHairStudio(page) {
-  await setPlayer(page, 28, -25.8);
+async function enterBuilding(page, buildingId) {
+  const entrance = await page.evaluate((id) => {
+    const match = window.__voxcelPlayer.entrances.find(({ b }) => b.id === id);
+    return { x: match.pos.x, z: match.pos.z };
+  }, buildingId);
+  await setPlayer(page, entrance.x, entrance.z);
   await page.keyboard.press("e");
+}
+
+async function enterHairStudio(page) {
+  await enterBuilding(page, "salon");
   await setPlayer(page, 28, -18);
   await page.keyboard.press("e");
   await expect(page.locator("#mC")).toContainText("Hair Studio");
 }
 
 async function enterClothingShop(page) {
-  await setPlayer(page, 28, -49.8);
-  await page.keyboard.press("e");
+  await enterBuilding(page, "cloth");
   await setPlayer(page, 28, -38.5);
   await page.keyboard.press("e");
   await expect(page.locator("#mC")).toContainText("👗 服");

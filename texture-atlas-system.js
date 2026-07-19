@@ -17,6 +17,12 @@
   const SIGN_CELL_HEIGHT = SIGN_ATLAS_HEIGHT / SIGN_ATLAS_ROWS;
   const SIGN_DEFAULT_INSET = 4;
 
+  const VEHICLE_ATLAS_URL = new URL("./images/voxcel-vehicle-atlas.png", document.baseURI).href;
+  const VEHICLE_ATLAS_SIZE = 1024;
+  const VEHICLE_GRID_SIZE = 4;
+  const VEHICLE_CELL_SIZE = VEHICLE_ATLAS_SIZE / VEHICLE_GRID_SIZE;
+  const VEHICLE_DEFAULT_INSET = 5;
+
   const tileNames = [
     "fabric_plain", "fabric_pinstripe", "fabric_gingham", "fabric_herringbone",
     "fabric_dots", "fabric_floral", "fabric_varsity", "fabric_dark_denim",
@@ -66,6 +72,23 @@
     }),
   ])));
 
+  const vehicleTileNames = [
+    "windshield", "side_window", "grille", "rear_light",
+    "headlight", "tire_tread", "wheel_face", "interior",
+    "car_door", "hood", "trunk", "bumper",
+    "bus_windows", "bus_door", "taxi_livery", "service_livery",
+  ];
+
+  const vehicleTiles = Object.freeze(Object.fromEntries(vehicleTileNames.map((name, index) => [
+    name,
+    Object.freeze({
+      name,
+      index,
+      column: index % VEHICLE_GRID_SIZE,
+      row: Math.floor(index / VEHICLE_GRID_SIZE),
+    }),
+  ])));
+
   let imagePromise = null;
   let texturePromise = null;
   let texture = null;
@@ -74,6 +97,10 @@
   let signTexturePromise = null;
   let signTexture = null;
   let signError = null;
+  let vehicleImagePromise = null;
+  let vehicleTexturePromise = null;
+  let vehicleTexture = null;
+  let vehicleError = null;
 
   function resolveRegion(tileOrRegion) {
     if (typeof tileOrRegion === "number") {
@@ -305,6 +332,124 @@
     };
   }
 
+  function resolveVehicleTile(tileOrIndex) {
+    if (typeof tileOrIndex === "number") {
+      const name = vehicleTileNames[tileOrIndex];
+      if (!name) throw new Error(`Unknown Voxcel vehicle atlas tile index: ${tileOrIndex}`);
+      return vehicleTiles[name];
+    }
+    const tile = vehicleTiles[tileOrIndex];
+    if (!tile) throw new Error(`Unknown Voxcel vehicle atlas tile: ${tileOrIndex}`);
+    return tile;
+  }
+
+  function getVehicleUvRect(tileOrIndex, inset = VEHICLE_DEFAULT_INSET) {
+    const tile = resolveVehicleTile(tileOrIndex);
+    const left = tile.column * VEHICLE_CELL_SIZE + inset;
+    const right = (tile.column + 1) * VEHICLE_CELL_SIZE - inset;
+    const top = tile.row * VEHICLE_CELL_SIZE + inset;
+    const bottom = (tile.row + 1) * VEHICLE_CELL_SIZE - inset;
+    return Object.freeze({
+      name: tile.name,
+      index: tile.index,
+      u0: left / VEHICLE_ATLAS_SIZE,
+      u1: right / VEHICLE_ATLAS_SIZE,
+      v0: top / VEHICLE_ATLAS_SIZE,
+      v1: bottom / VEHICLE_ATLAS_SIZE,
+    });
+  }
+
+  function loadVehicleImage() {
+    if (vehicleImagePromise) return vehicleImagePromise;
+    vehicleImagePromise = new Promise((resolve, reject) => {
+      const image = new Image();
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        image.removeEventListener("load", handleLoad);
+        image.removeEventListener("error", handleError);
+        callback(value);
+      };
+      const fail = (reason) => {
+        vehicleImagePromise = null;
+        finish(reject, reason);
+      };
+      const handleLoad = () => {
+        if (
+          image.naturalWidth !== VEHICLE_ATLAS_SIZE ||
+          image.naturalHeight !== VEHICLE_ATLAS_SIZE
+        ) {
+          fail(new Error(
+            `Unexpected Voxcel vehicle atlas dimensions: ${image.naturalWidth}x${image.naturalHeight}`,
+          ));
+          return;
+        }
+        finish(resolve, image);
+      };
+      const handleError = () => {
+        fail(new Error(`Could not load Voxcel vehicle atlas: ${VEHICLE_ATLAS_URL}`));
+      };
+      const timeoutId = window.setTimeout(() => {
+        fail(new Error(`Timed out loading Voxcel vehicle atlas: ${VEHICLE_ATLAS_URL}`));
+      }, IMAGE_LOAD_TIMEOUT_MS);
+      image.decoding = "async";
+      image.addEventListener("load", handleLoad);
+      image.addEventListener("error", handleError);
+      image.src = VEHICLE_ATLAS_URL;
+    });
+    return vehicleImagePromise;
+  }
+
+  async function getVehicleTexture({ TextureConstructor, referenceTexture, renderer } = {}) {
+    if (vehicleTexture) return vehicleTexture;
+    if (vehicleTexturePromise) return vehicleTexturePromise;
+    if (typeof TextureConstructor !== "function") {
+      throw new Error("A Three.js Texture constructor is required for the Voxcel vehicle atlas");
+    }
+
+    vehicleTexturePromise = (async () => {
+      const image = await loadVehicleImage();
+      const nextTexture = new TextureConstructor(image);
+      nextTexture.name = "VoxcelVehicleAtlas";
+      nextTexture.flipY = false;
+      nextTexture.wrapS = 1001;
+      nextTexture.wrapT = 1001;
+      nextTexture.magFilter = 1006;
+      nextTexture.minFilter = 1008;
+      nextTexture.generateMipmaps = true;
+      nextTexture.anisotropy = Math.min(4, renderer?.capabilities?.getMaxAnisotropy?.() || 1);
+      nextTexture.colorSpace = referenceTexture?.colorSpace || "srgb";
+      nextTexture.userData.voxcelVehicleAtlas = true;
+      nextTexture.userData.voxcelAtlasSize = VEHICLE_ATLAS_SIZE;
+      nextTexture.userData.voxcelAtlasCellSize = VEHICLE_CELL_SIZE;
+      nextTexture.needsUpdate = true;
+      vehicleTexture = nextTexture;
+      vehicleError = null;
+      return vehicleTexture;
+    })().catch((reason) => {
+      vehicleError = reason instanceof Error ? reason : new Error(String(reason));
+      vehicleTexturePromise = null;
+      throw vehicleError;
+    });
+
+    return vehicleTexturePromise;
+  }
+
+  function getVehicleState() {
+    return {
+      ready: Boolean(vehicleTexture),
+      loading: Boolean(vehicleTexturePromise && !vehicleTexture),
+      error: vehicleError?.message || null,
+      url: VEHICLE_ATLAS_URL,
+      width: VEHICLE_ATLAS_SIZE,
+      height: VEHICLE_ATLAS_SIZE,
+      tileCount: vehicleTileNames.length,
+      textureUuid: vehicleTexture?.uuid || null,
+    };
+  }
+
   window.__voxcelTextureAtlas = Object.freeze({
     url: ATLAS_URL,
     size: ATLAS_SIZE,
@@ -329,5 +474,20 @@
     getUvRect: getSignUvRect,
     getTexture: getSignTexture,
     getState: getSignState,
+  });
+
+  window.__voxcelVehicleAtlas = Object.freeze({
+    url: VEHICLE_ATLAS_URL,
+    size: VEHICLE_ATLAS_SIZE,
+    width: VEHICLE_ATLAS_SIZE,
+    height: VEHICLE_ATLAS_SIZE,
+    gridSize: VEHICLE_GRID_SIZE,
+    columns: VEHICLE_GRID_SIZE,
+    rows: VEHICLE_GRID_SIZE,
+    cellSize: VEHICLE_CELL_SIZE,
+    tiles: vehicleTiles,
+    getUvRect: getVehicleUvRect,
+    getTexture: getVehicleTexture,
+    getState: getVehicleState,
   });
 })();

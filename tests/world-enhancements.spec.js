@@ -21,6 +21,15 @@ async function setPlayer(page, x, z, yaw = 0) {
   await page.waitForTimeout(180);
 }
 
+async function enterBuilding(page, buildingId) {
+  const entrance = await page.evaluate((id) => {
+    const match = window.__voxcelPlayer.entrances.find(({ b }) => b.id === id);
+    return { x: match.pos.x, z: match.pos.z };
+  }, buildingId);
+  await setPlayer(page, entrance.x, entrance.z, Math.PI);
+  await page.keyboard.press("e");
+}
+
 test.describe("world enhancements", () => {
   test("uses soft layered clouds instead of the low-poly sphere clusters", async ({ page }) => {
     await startGame(page);
@@ -35,8 +44,7 @@ test.describe("world enhancements", () => {
 
   test("switches to a dedicated interior scene without enter or exit messages", async ({ page }) => {
     await startGame(page);
-    await setPlayer(page, 28, -25.8, Math.PI);
-    await page.keyboard.press("e");
+    await enterBuilding(page, "salon");
 
     await expect.poll(async () => (await sample(page)).enhancements.activeScene).toBe("interior");
     const entered = await sample(page);
@@ -101,8 +109,7 @@ test.describe("world enhancements", () => {
     const tree = await sample(page);
     expect(Math.hypot(tree.player.x + 98.8, tree.player.z - 34.8)).toBeGreaterThan(0.62);
 
-    await setPlayer(page, 28, -25.8, Math.PI);
-    await page.keyboard.press("e");
+    await enterBuilding(page, "salon");
     await expect.poll(async () => (await sample(page)).enhancements.activeScene).toBe("interior");
     await page.keyboard.down("ArrowDown");
     await page.waitForTimeout(320);

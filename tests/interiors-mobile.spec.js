@@ -35,12 +35,17 @@ test("mobile touch controls fit while the expanded bookstore remains usable", as
     });
   });
 
-  const book = await page.evaluate(() => ({
-    ...window.__voxcelPlayer.buildings.find(({ id }) => id === "book"),
-  }));
+  const { book, entrance } = await page.evaluate(() => {
+    const match = window.__voxcelPlayer.buildings.find(({ id }) => id === "book");
+    const exteriorEntrance = window.__voxcelPlayer.entrances.find(({ b }) => b.id === "book");
+    return {
+      book: { ...match },
+      entrance: { x: exteriorEntrance.pos.x, z: exteriorEntrance.pos.z },
+    };
+  });
   await page.evaluate(({ x, z }) => window.__voxcelTest.setPlayer(x, z, Math.PI), {
-    x: book.x,
-    z: book.z - book.d / 2 - 1.8,
+    x: entrance.x,
+    z: entrance.z,
   });
   await page.waitForTimeout(180);
   await page.locator("#iBtn").tap();

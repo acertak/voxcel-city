@@ -20,11 +20,21 @@ async function setPlayer(page, x, z, yaw = Math.PI) {
 }
 
 async function enterBuilding(page, id) {
-  const building = await page.evaluate((buildingId) => {
+  const { building, entrance } = await page.evaluate((buildingId) => {
     const match = window.__voxcelPlayer.buildings.find(({ id }) => id === buildingId);
-    return { id: match.id, x: match.x, z: match.z, width: match.w, depth: match.d };
+    const exteriorEntrance = window.__voxcelPlayer.entrances.find(({ b }) => b.id === buildingId);
+    return {
+      building: {
+        id: match.id,
+        x: match.x,
+        z: match.z,
+        width: match.w,
+        depth: match.d,
+      },
+      entrance: { x: exteriorEntrance.pos.x, z: exteriorEntrance.pos.z },
+    };
   }, id);
-  await setPlayer(page, building.x, building.z - building.depth / 2 - 1.8);
+  await setPlayer(page, entrance.x, entrance.z);
   await page.keyboard.press("e");
   await expect.poll(async () => page.evaluate(() => (
     window.__voxcelEnhancements.getState().buildingId

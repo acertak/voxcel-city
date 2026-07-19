@@ -18,7 +18,11 @@ async function setPlayer(page, x, z, yaw = Math.PI) {
 }
 
 async function enterBuilding(page, building) {
-  await setPlayer(page, building.x, building.z - building.d / 2 - 1.8);
+  const entrance = await page.evaluate((buildingId) => {
+    const match = window.__voxcelPlayer.entrances.find(({ b }) => b.id === buildingId);
+    return { x: match.pos.x, z: match.pos.z };
+  }, building.id);
+  await setPlayer(page, entrance.x, entrance.z);
   await page.keyboard.press("e");
   await expect.poll(async () => {
     return page.evaluate(() => window.__voxcelEnhancements.getState().buildingId);
@@ -78,16 +82,18 @@ test.describe("spacious themed interiors", () => {
     await exitBuilding(page, building, state.roomDimensions);
     const restored = await page.evaluate(() => {
       const book = window.__voxcelPlayer.buildings.find(({ id }) => id === "book");
+      const entrance = window.__voxcelPlayer.entrances.find(({ b }) => b.id === "book");
       return {
         width: book.w,
         depth: book.d,
         player: window.__voxcelTest.sample().player,
+        entrance: { x: entrance.pos.x, z: entrance.pos.z },
       };
     });
     expect(restored.width).toBe(12);
     expect(restored.depth).toBe(12);
-    expect(restored.player.x).toBeCloseTo(building.x, 1);
-    expect(restored.player.z).toBeCloseTo(building.z - building.d / 2 - 2, 1);
+    expect(restored.player.x).toBeCloseTo(restored.entrance.x, 1);
+    expect(restored.player.z).toBeCloseTo(restored.entrance.z, 1);
   });
 
   test("all thirteen buildings use larger, distinct themed rooms and restore exterior sizes", async ({ page }) => {
