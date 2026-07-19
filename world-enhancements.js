@@ -145,6 +145,9 @@
     officeFloor: 1,
     officeFloorCount: 50,
     officeFloorVariant: "lobby",
+    officeElevatorVisual: null,
+    officeDynamicTextures: new Set(),
+    officeWindowCount: 0,
   };
 
   function findPrototypeConstructor(object, methodName) {
@@ -831,6 +834,106 @@
       material.userData.voxcelInteriorMaterial = true;
       runtime.interiorMaterials.add(material);
       return material;
+    }
+
+    function createCanvasTexture(canvas, name) {
+      const TextureConstructor = constructors.CanvasTexture || constructors.Texture;
+      if (!TextureConstructor || !canvas) return null;
+      const texture = new TextureConstructor(canvas);
+      texture.name = name;
+      texture.flipY = false;
+      texture.wrapS = 1001;
+      texture.wrapT = 1001;
+      texture.magFilter = 1003;
+      texture.minFilter = 1008;
+      texture.generateMipmaps = true;
+      texture.colorSpace = canvasTexture?.colorSpace || "srgb";
+      texture.needsUpdate = true;
+      runtime.officeDynamicTextures.add(texture);
+      return texture;
+    }
+
+    function createBrushedMetalCanvas() {
+      const canvas = document.createElement("canvas");
+      canvas.width = 256;
+      canvas.height = 256;
+      const context = canvas.getContext("2d");
+      const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+      gradient.addColorStop(0, "#6d7c86");
+      gradient.addColorStop(.45, "#26343d");
+      gradient.addColorStop(.55, "#8d9ba1");
+      gradient.addColorStop(1, "#1b2830");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      for (let line = 0; line < 180; line += 1) {
+        const y = (line * 17) % canvas.height;
+        context.strokeStyle = line % 3 === 0 ? "rgba(220,240,245,.14)" : "rgba(0,0,0,.16)";
+        context.lineWidth = line % 5 === 0 ? 2 : 1;
+        context.beginPath();
+        context.moveTo(0, y + .5);
+        context.lineTo(canvas.width, y + .5);
+        context.stroke();
+      }
+      context.strokeStyle = "rgba(160,220,236,.42)";
+      context.lineWidth = 3;
+      context.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+      return canvas;
+    }
+
+    function createOfficeWindowCanvas() {
+      const canvas = document.createElement("canvas");
+      canvas.width = 192;
+      canvas.height = 320;
+      const context = canvas.getContext("2d");
+      const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, "#071725");
+      gradient.addColorStop(.5, "#153c58");
+      gradient.addColorStop(1, "#050b14");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      for (let row = 0; row < 16; row += 1) {
+        for (let column = 0; column < 8; column += 1) {
+          const lit = (row * 7 + column * 11) % 5 !== 0;
+          context.fillStyle = lit ? "rgba(255,214,124,.68)" : "rgba(116,196,229,.28)";
+          context.fillRect(10 + column * 23, 12 + row * 19, 8, 5);
+        }
+      }
+      context.fillStyle = "rgba(102,211,255,.16)";
+      context.fillRect(0, 0, 12, canvas.height);
+      context.fillRect(canvas.width - 12, 0, 12, canvas.height);
+      return canvas;
+    }
+
+    function createElevatorDisplayCanvas(floor = 1, phase = "idle") {
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 128;
+      drawElevatorDisplayCanvas(canvas, floor, phase);
+      return canvas;
+    }
+
+    function drawElevatorDisplayCanvas(canvas, floor, phase = "idle") {
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, "#091219");
+      gradient.addColorStop(1, "#020507");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.strokeStyle = "rgba(111,212,255,.7)";
+      context.lineWidth = 4;
+      context.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
+      context.fillStyle = phase === "moving" ? "#ffd666" : "#7ce2ff";
+      context.shadowColor = context.fillStyle;
+      context.shadowBlur = phase === "moving" ? 14 : 8;
+      context.font = "800 66px ui-monospace, SFMono-Regular, Menlo, monospace";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(`${Math.max(1, Math.round(floor))}F`, canvas.width / 2, 61);
+      context.shadowBlur = 0;
+      context.fillStyle = "rgba(204,235,244,.74)";
+      context.font = "700 13px system-ui, sans-serif";
+      context.fillText(phase === "moving" ? "MOVING" : "CITY OFFICE", canvas.width / 2, 106);
     }
 
     function makeBox(group, name, size, position, material) {
@@ -1777,6 +1880,91 @@
       );
     }
 
+    function addOfficeElevatorCabin(group, building, materials, floor) {
+      const cabin = makeFixtureGroup(group, "OfficeElevator:Cabin");
+      cabin.userData.voxcelOfficeElevator = true;
+      const panelTexture = createCanvasTexture(createBrushedMetalCanvas(), "CityOfficeElevatorBrushedMetal");
+      const displayCanvas = createElevatorDisplayCanvas(floor, "idle");
+      const displayTexture = createCanvasTexture(displayCanvas, "CityOfficeElevatorDisplay");
+      const panelMaterial = makeMaterial(0x73858f, {
+        ...(panelTexture ? { map: panelTexture } : {}),
+        roughness: 0.32,
+        metalness: 0.72,
+      });
+      const darkPanelMaterial = makeMaterial(0x1a2830, {
+        ...(panelTexture ? { map: panelTexture } : {}),
+        roughness: 0.34,
+        metalness: 0.62,
+      });
+      const buttonMaterial = makeMaterial(0xb8d9e3, {
+        roughness: 0.24,
+        metalness: 0.74,
+        emissive: 0x2d6c7d,
+        emissiveIntensity: 0.42,
+      });
+      const displayMaterial = makeMaterial(0x86dff5, {
+        ...(displayTexture ? { map: displayTexture } : {}),
+        roughness: 0.2,
+        metalness: 0.25,
+        emissive: 0x164f6e,
+        emissiveIntensity: 0.72,
+      });
+
+      const cabinBox = (name, size, offset, material, options = {}) => makeFixtureBox(
+        cabin,
+        building,
+        name,
+        size,
+        offset,
+        material,
+        "elevator-cabin",
+        { solid: false, ...options },
+      );
+
+      cabinBox("OfficeElevator:Cabin:floor", [4.65, 0.12, 3.9], [9.4, 0.08, 10.2], darkPanelMaterial, { castShadow: false });
+      cabinBox("OfficeElevator:Cabin:back-panel", [4.65, 3.1, 0.12], [9.4, 1.62, 8.26], panelMaterial);
+      cabinBox("OfficeElevator:Cabin:left-panel", [0.12, 3.1, 3.9], [7.12, 1.62, 10.2], panelMaterial);
+      cabinBox("OfficeElevator:Cabin:right-panel", [0.12, 3.1, 3.9], [11.68, 1.62, 10.2], panelMaterial);
+      cabinBox("OfficeElevator:Cabin:ceiling", [4.65, 0.12, 3.9], [9.4, 3.18, 10.2], darkPanelMaterial, { castShadow: false });
+      cabinBox("OfficeElevator:Cabin:handrail-left", [0.08, 0.08, 3.1], [7.3, 1.48, 10.35], buttonMaterial, { castShadow: false });
+      cabinBox("OfficeElevator:Cabin:handrail-right", [0.08, 0.08, 3.1], [11.5, 1.48, 10.35], buttonMaterial, { castShadow: false });
+
+      const leftDoor = cabinBox("OfficeElevator:Cabin:door-left", [1.03, 3.05, 0.1], [8.86, 1.62, 12.16], panelMaterial);
+      const rightDoor = cabinBox("OfficeElevator:Cabin:door-right", [1.03, 3.05, 0.1], [9.94, 1.62, 12.16], panelMaterial);
+      const display = cabinBox("OfficeElevator:Cabin:floor-display", [1.8, 0.62, 0.06], [9.4, 2.88, 12.08], displayMaterial, { castShadow: false });
+      display.userData.voxcelElevatorDisplay = true;
+
+      cabinBox("OfficeElevator:Cabin:control-panel", [0.1, 1.5, 0.72], [11.59, 1.54, 9.62], darkPanelMaterial);
+      for (let button = 0; button < 6; button += 1) {
+        const buttonFloor = [1, 10, 20, 30, 40, 50][button];
+        const buttonMesh = cabinBox(
+          `OfficeElevator:Cabin:button:${buttonFloor}F`,
+          [0.05, 0.14, 0.25],
+          [11.66, 2.12 - Math.floor(button / 2) * 0.38, 9.36 + (button % 2) * 0.5],
+          buttonMaterial,
+          { castShadow: false },
+        );
+        buttonMesh.userData.officeElevatorFloor = buttonFloor;
+      }
+      cabinBox("OfficeElevator:Cabin:alarm-button", [0.05, 0.18, 0.3], [11.66, 0.72, 9.62], materials.red, { castShadow: false });
+
+      runtime.officeElevatorVisual = {
+        cabin,
+        leftDoor,
+        rightDoor,
+        display,
+        displayCanvas,
+        displayTexture,
+        currentFloor: floor,
+        displayGoal: floor,
+        displayPhase: "idle",
+        displayStepAt: 0,
+        doorProgress: 0,
+        doorsOpen: false,
+        lastTime: performance.now(),
+      };
+    }
+
     function addOfficeElevatorBank(group, building, materials, floor) {
       makeFixtureBox(
         group,
@@ -1821,9 +2009,24 @@
         { solid: false },
       );
       addRug(group, building, "OfficeElevator:lobby-rug", [9.6, 4.2], [9.4, 10.1], materials.blue, "elevator-lobby");
+      addOfficeElevatorCabin(group, building, materials, floor);
+    }
+
+    function addOfficeWindowDetails(group, building, profile, materials) {
+      const windowCount = 5;
+      const windowSpan = (profile.depth - 1.4) / windowCount;
+      for (const side of [-1, 1]) {
+        const x = side * (profile.width / 2 - 0.14);
+        for (let window = 0; window < windowCount; window += 1) {
+          const z = -profile.depth / 2 + 0.7 + windowSpan * (window + 0.5);
+          makeFixtureBox(group, building, `OfficeWindowDetail:${side}:${window}:sill`, [0.28, 0.1, windowSpan - 0.16], [x, 0.62, z], materials.metal, "office-window", { solid: false, castShadow: false });
+          makeFixtureBox(group, building, `OfficeWindowDetail:${side}:${window}:frame`, [0.12, 5.6, 0.08], [x, 3.42, z], materials.metal, "office-window", { solid: false, castShadow: false });
+        }
+      }
     }
 
     function buildOfficeLobby(group, building, profile, materials) {
+      addOfficeWindowDetails(group, building, profile, materials);
       addRug(group, building, "OfficeLobby:rug", [10.5, 7.2], [0, -7.2], materials.blue, "office-lobby");
       addCounter(
         group,
@@ -1857,6 +2060,7 @@
     }
 
     function buildOfficeGeneralFloor(group, building, profile, materials, floor) {
+      addOfficeWindowDetails(group, building, profile, materials);
       addRug(group, building, "OfficeWorkArea:rug", [17.2, 14.6], [2.3, -2.2], materials.blue, "open-office");
       const deskPositions = [
         [-3.5, -6.5], [1.4, -6.5], [6.3, -6.5],
@@ -1882,6 +2086,7 @@
     }
 
     function buildOfficeExecutiveFloor(group, building, profile, materials) {
+      addOfficeWindowDetails(group, building, profile, materials);
       addRug(group, building, "ExecutiveLobby:rug", [10.5, 6.4], [5.0, 6.0], materials.mustard, "executive-lobby");
       addCounter(group, building, { name: "ExecutiveReception", x: 2.8, z: 4.4, width: 5.4, role: "executive-reception", material: materials.mustard }, materials);
 
@@ -2028,6 +2233,21 @@
       const doorMaterial = makeMaterial(0x493326, { roughness: 0.66 });
       const wallHeight = profile.height;
       const wallThickness = 0.24;
+      const officeWindowTexture = building.id === "office"
+        ? createCanvasTexture(createOfficeWindowCanvas(), "CityOfficeWindowNight")
+        : null;
+      const officeWindowMaterial = building.id === "office"
+        ? makeMaterial(0x16384f, {
+          ...(officeWindowTexture ? { map: officeWindowTexture } : {}),
+          roughness: 0.22,
+          metalness: 0.32,
+          emissive: 0x0d2c48,
+          emissiveIntensity: 0.42,
+        })
+        : null;
+      const officeWindowFrameMaterial = building.id === "office"
+        ? makeMaterial(0x1e303c, { roughness: 0.42, metalness: 0.62 })
+        : null;
 
       makeBox(
         shell,
@@ -2058,7 +2278,32 @@
         sideGroup.name = `InteriorWall:${side}`;
         sideGroup.userData.voxcelInteriorShell = true;
         shell.add(sideGroup);
-        makeBox(sideGroup, `${side}:wall`, size, position, wallMaterial);
+        if (building.id === "office" && (side === "west" || side === "east")) {
+          const windowBottom = 0.62;
+          const windowTop = wallHeight - 0.62;
+          const windowHeight = windowTop - windowBottom;
+          const windowCount = 5;
+          const windowSpan = (profile.depth - 1.4) / windowCount;
+          const sideX = position[0];
+          makeBox(sideGroup, `${side}:window-sill-wall`, [wallThickness, windowBottom, profile.depth], [sideX, windowBottom / 2, building.z], wallMaterial);
+          makeBox(sideGroup, `${side}:window-header-wall`, [wallThickness, wallHeight - windowTop, profile.depth], [sideX, windowTop + (wallHeight - windowTop) / 2, building.z], wallMaterial);
+          for (let window = 0; window < windowCount; window += 1) {
+            const z = building.z - profile.depth / 2 + 0.7 + windowSpan * (window + 0.5);
+            const pane = makeBox(
+              sideGroup,
+              `OfficeWindow:${side}:${window}:glass`,
+              [0.07, windowHeight, windowSpan - 0.26],
+              [sideX, (windowBottom + windowTop) / 2, z],
+              officeWindowMaterial,
+            );
+            pane.userData.voxcelOfficeWindow = true;
+            runtime.officeWindowCount += 1;
+            makeBox(sideGroup, `OfficeWindow:${side}:${window}:mullion`, [wallThickness + 0.04, windowHeight + 0.16, 0.12], [sideX, (windowBottom + windowTop) / 2, z], officeWindowFrameMaterial);
+            makeBox(sideGroup, `OfficeWindow:${side}:${window}:sill`, [wallThickness + 0.16, 0.12, windowSpan - 0.12], [sideX, windowBottom - 0.04, z], officeWindowFrameMaterial);
+          }
+        } else {
+          makeBox(sideGroup, `${side}:wall`, size, position, wallMaterial);
+        }
         shellSides[side] = sideGroup;
       }
 
@@ -2257,7 +2502,53 @@
       runtime.bookStripCount = 0;
       runtime.productStripCount = 0;
       runtime.garmentTextureCount = 0;
+      runtime.officeElevatorVisual = null;
+      for (const texture of runtime.officeDynamicTextures) texture.dispose?.();
+      runtime.officeDynamicTextures.clear();
     }
+
+    function setElevatorState({ doorsOpen, displayFloor, targetFloor, phase } = {}) {
+      const visual = runtime.officeElevatorVisual;
+      if (!visual) return false;
+      if (typeof doorsOpen === "boolean") visual.doorsOpen = doorsOpen;
+      const nextFloor = Number.isFinite(Number(displayFloor))
+        ? Math.max(1, Math.min(runtime.officeFloorCount, Math.round(Number(displayFloor))))
+        : visual.displayGoal;
+      if (Number.isFinite(Number(targetFloor))) {
+        visual.displayGoal = Math.max(1, Math.min(runtime.officeFloorCount, Math.round(Number(targetFloor))));
+      } else {
+        visual.displayGoal = nextFloor;
+      }
+      visual.displayPhase = phase || "idle";
+      if (visual.displayPhase === "moving") visual.displayStepAt = 0;
+      return true;
+    }
+
+    function updateOfficeElevator(now) {
+      const visual = runtime.officeElevatorVisual;
+      if (!visual) return;
+      const elapsed = Math.max(0, Math.min(80, now - (visual.lastTime || now)));
+      visual.lastTime = now;
+      const targetProgress = visual.doorsOpen ? 1 : 0;
+      visual.doorProgress += (targetProgress - visual.doorProgress) * Math.min(1, elapsed / 170);
+      const originX = runtime.activeBuilding?.x || 0;
+      visual.leftDoor.position.x = originX + 8.86 - visual.doorProgress * 1.05;
+      visual.rightDoor.position.x = originX + 9.94 + visual.doorProgress * 1.05;
+      if (visual.displayPhase === "moving" && visual.currentFloor !== visual.displayGoal) {
+        if (!visual.displayStepAt || now >= visual.displayStepAt) {
+          visual.currentFloor += Math.sign(visual.displayGoal - visual.currentFloor);
+          visual.displayStepAt = now + 74;
+          drawElevatorDisplayCanvas(visual.displayCanvas, visual.currentFloor, "moving");
+          visual.displayTexture && (visual.displayTexture.needsUpdate = true);
+        }
+      } else if (visual.currentFloor !== visual.displayGoal || visual.displayPhase !== visual.lastDisplayPhase) {
+        visual.currentFloor = visual.displayGoal;
+        drawElevatorDisplayCanvas(visual.displayCanvas, visual.currentFloor, visual.displayPhase);
+        visual.displayTexture && (visual.displayTexture.needsUpdate = true);
+        visual.lastDisplayPhase = visual.displayPhase;
+      }
+    }
+
 
     function setOfficeExitAvailability(floor) {
       const points = handle.buildingViews?.office?.interiorPts || [];
@@ -2326,8 +2617,9 @@
 
     function enterInterior(building) {
       if (building.id === "office") {
-        runtime.officeFloor = 1;
-        runtime.officeFloorVariant = "lobby";
+      runtime.officeFloor = 1;
+      runtime.officeFloorVariant = "lobby";
+      runtime.officeWindowCount = 0;
       }
       runtime.originalBuildingDimensions = { w: building.w, d: building.d, h: building.h };
       runtime.originalInteractionPositions = [];
@@ -2465,6 +2757,8 @@
       runtime.activeInteriorMaterials = null;
       runtime.activeInteriorProfile = null;
       runtime.activeBuilding = null;
+      runtime.officeElevatorVisual = null;
+      runtime.officeWindowCount = 0;
       runtime.roomDimensions = null;
       runtime.themeId = null;
       runtime.themeFixtureCount = 0;
@@ -2841,6 +3135,7 @@
       enforceVehicleCollision(now);
       enforcePlayerCollision(now);
       updateInteriorShell();
+      updateOfficeElevator(now);
       const activeScene = runtime.activeScene || requestedScene;
       for (const registration of runtime.beforeRenderCallbacks) {
         try {
@@ -2931,6 +3226,18 @@
           exitAvailable: runtime.activeBuilding?.id === "office" && runtime.officeFloor === 1,
           loadedFloorCount: runtime.activeBuilding?.id === "office" ? 1 : 0,
         },
+        officeWindows: {
+          count: runtime.activeBuilding?.id === "office" ? runtime.officeWindowCount : 0,
+          textured: runtime.activeBuilding?.id === "office" && runtime.officeWindowCount > 0,
+        },
+        elevatorVisual: runtime.officeElevatorVisual ? {
+          doorsOpen: runtime.officeElevatorVisual.doorsOpen,
+          doorProgress: Number(runtime.officeElevatorVisual.doorProgress.toFixed(3)),
+          displayFloor: runtime.officeElevatorVisual.currentFloor,
+          displayGoal: runtime.officeElevatorVisual.displayGoal,
+          displayPhase: runtime.officeElevatorVisual.displayPhase,
+          panelTexture: Boolean(runtime.officeElevatorVisual.displayTexture),
+        } : null,
         signAtlas: {
           status: runtime.signAtlasStatus,
           ready: runtime.signAtlasStatus === "ready",
@@ -3007,6 +3314,7 @@
       },
       refreshColliders: () => refreshColliderRegistry(performance.now(), true),
       setOfficeFloor,
+      setElevatorState,
       handleInteraction(action) {
         if (action !== "office-elevator" || runtime.activeBuilding?.id !== "office") return false;
         return Boolean(window.__voxcelOffice?.openElevator?.());
