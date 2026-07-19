@@ -123,4 +123,41 @@ test.describe("world enhancements", () => {
     await page.keyboard.press("e");
     await expect(page.locator("#mC")).toContainText("Hair Studio");
   });
+
+  test("blocks a driven car from passing through another vehicle", async ({ page }) => {
+    await startGame(page);
+
+    const setup = await page.evaluate(() => {
+      window.__voxcelTest.attachPlayerVehicle("ns", 0, 1, -14);
+      const playerVehicle = window.__voxcelPlayer.state.vehicle;
+      const obstacle = window.__voxcelPlayer.vehicles.find((vehicle) => vehicle !== playerVehicle);
+      playerVehicle.m.position.set(2, 0, -14);
+      playerVehicle.m.rotation.y = 0;
+      playerVehicle.driveSpeed = 0;
+      obstacle.manual = true;
+      obstacle.driveSpeed = 0;
+      obstacle.curSp = 0;
+      obstacle.m.position.set(2, 0, -8);
+      obstacle.m.traverse((object) => {
+        if (object.isMesh) object.userData.collisionMode = "none";
+      });
+      window.__voxcelEnhancements.refreshColliders();
+      return { playerZ: playerVehicle.m.position.z, obstacleZ: obstacle.m.position.z };
+    });
+
+    expect(setup).toEqual({ playerZ: -14, obstacleZ: -8 });
+    await page.waitForTimeout(180);
+    await page.evaluate(() => {
+      window.__voxcelPlayer.state.vehicle.m.position.z = -6;
+    });
+    await page.waitForTimeout(120);
+
+    const result = await page.evaluate(() => ({
+      playerZ: window.__voxcelPlayer.state.vehicle.m.position.z,
+      state: window.__voxcelEnhancements.getState(),
+    }));
+    expect(result.playerZ).toBeLessThan(-10.9);
+    expect(result.state.vehicleToVehicleBlockedMoves).toBeGreaterThan(0);
+    expect(result.state.lastCollisionObject).toBeTruthy();
+  });
 });

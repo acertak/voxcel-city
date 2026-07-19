@@ -121,6 +121,7 @@
     colliderCount: 0,
     blockedMoves: 0,
     vehicleBlockedMoves: 0,
+    vehicleToVehicleBlockedMoves: 0,
     lastCollisionObject: null,
     lastColliderRefresh: 0,
     lastPosition: null,
@@ -3371,6 +3372,50 @@
       return false;
     }
 
+    function segmentDistanceSquared(fromX, fromZ, targetX, targetZ, pointX, pointZ) {
+      const deltaX = targetX - fromX;
+      const deltaZ = targetZ - fromZ;
+      const lengthSquared = deltaX * deltaX + deltaZ * deltaZ;
+      if (lengthSquared < 0.000001) {
+        return (pointX - fromX) ** 2 + (pointZ - fromZ) ** 2;
+      }
+      const amount = Math.max(0, Math.min(1, (
+        (pointX - fromX) * deltaX + (pointZ - fromZ) * deltaZ
+      ) / lengthSquared));
+      const closestX = fromX + deltaX * amount;
+      const closestZ = fromZ + deltaZ * amount;
+      return (pointX - closestX) ** 2 + (pointZ - closestZ) ** 2;
+    }
+
+    function vehicleRadius(vehicle) {
+      return vehicle?.type === "bus" ? 2.35 : 1.55;
+    }
+
+    function vehiclePathHitsAnother(vehicle, fromX, fromZ, targetX, targetZ) {
+      const vehicles = Array.isArray(handle.vehicles) ? handle.vehicles : [];
+      const radius = vehicleRadius(vehicle);
+      for (const other of vehicles) {
+        if (
+          other === vehicle ||
+          !other?.m?.visible ||
+          !isVisibleInScene(other.m, cityScene)
+        ) continue;
+        const minimumDistance = radius + vehicleRadius(other);
+        if (segmentDistanceSquared(
+          fromX,
+          fromZ,
+          targetX,
+          targetZ,
+          other.m.position.x,
+          other.m.position.z,
+        ) < minimumDistance * minimumDistance) {
+          runtime.lastCollisionObject = other.m.name || other.m.userData?.voxcelVehicleId || "vehicle";
+          return true;
+        }
+      }
+      return false;
+    }
+
     function nearestInteriorInteraction() {
       const buildingId = runtime.activeBuilding?.id;
       const points = buildingId ? handle.buildingViews?.[buildingId]?.interiorPts : null;
@@ -3503,14 +3548,16 @@
       const last = runtime.lastVehiclePosition;
       const distance = Math.hypot(position.x - last.x, position.z - last.z);
       if (distance < 0.0001) return;
-      if (distance > 3) {
+      if (distance > 12) {
         last.copy(position);
         return;
       }
 
       const radius = vehicle.type === "bus" ? 2 : 1.45;
       const colliders = buildActiveColliders(radius, vehicle.m);
-      if (sweptPathIsBlocked(colliders, last.x, last.z, position.x, position.z)) {
+      const hitStaticObject = sweptPathIsBlocked(colliders, last.x, last.z, position.x, position.z);
+      const hitVehicle = vehiclePathHitsAnother(vehicle, last.x, last.z, position.x, position.z);
+      if (hitStaticObject || hitVehicle) {
         const correctionX = last.x - position.x;
         const correctionZ = last.z - position.z;
         position.x = last.x;
@@ -3521,6 +3568,7 @@
         camera.position.x += correctionX;
         camera.position.z += correctionZ;
         runtime.vehicleBlockedMoves += 1;
+        if (hitVehicle) runtime.vehicleToVehicleBlockedMoves += 1;
       }
       last.copy(position);
     }
@@ -3605,6 +3653,7 @@
         registeredColliderMeshes: runtime.colliderNodes.size,
         blockedMoves: runtime.blockedMoves,
         vehicleBlockedMoves: runtime.vehicleBlockedMoves,
+        vehicleToVehicleBlockedMoves: runtime.vehicleToVehicleBlockedMoves,
         lastCollisionObject: runtime.lastCollisionObject,
         suppressedMessages: runtime.suppressedMessages,
         sceneSwitches: runtime.sceneSwitches,

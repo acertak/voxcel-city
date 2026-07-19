@@ -3,7 +3,7 @@
 
   if (window.__voxcelStreetscape?.ready) return;
 
-  const SYSTEM_VERSION = 1;
+  const SYSTEM_VERSION = 2;
   const SIGN_LIFT = 0.35;
   const STOP_LINE_OFFSET = 10.2;
   const CROSSWALK_CENTER_OFFSET = 6;
@@ -68,17 +68,19 @@
     }
   }
 
-  function isCenterSignalBar(mesh) {
+  function isSignalLensBar(mesh) {
     const size = geometrySize(mesh);
     return Boolean(
       mesh?.isMesh &&
       size &&
-      closeTo(size.width, 0.88) &&
-      closeTo(size.height, 0.2) &&
-      closeTo(size.depth, 0.18) &&
-      closeTo(mesh.position.x, 6.15) &&
-      closeTo(mesh.position.y, 3.72) &&
-      closeTo(mesh.position.z, 0.34)
+      size.width >= 0.7 &&
+      size.width <= 1.05 &&
+      size.height <= 0.24 &&
+      size.depth <= 0.24 &&
+      mesh.position.y >= 3.2 &&
+      mesh.position.y <= 4.3 &&
+      mesh.position.z >= 0.2 &&
+      mesh.position.z <= 0.48
     );
   }
 
@@ -86,13 +88,16 @@
     for (const signal of handle?.trafficLights || []) {
       if (signal.kind !== "vehicle" || !signal.group) continue;
       state.vehicleSignalCount += 1;
-      const centerBar = signal.group.children.find(isCenterSignalBar);
-      if (!centerBar) continue;
-      signal.group.remove(centerBar);
-      centerBar.geometry?.dispose?.();
+      const lensBars = signal.group.children.filter(isSignalLensBar);
+      if (!lensBars.length) continue;
+      for (const lensBar of lensBars) {
+        signal.group.remove(lensBar);
+        lensBar.geometry?.dispose?.();
+      }
       signal.group.userData ||= {};
       signal.group.userData.voxcelCenterSignalBarRemoved = true;
-      state.removedCenterBarCount += 1;
+      signal.group.userData.voxcelRemovedSignalLensBars = lensBars.length;
+      state.removedCenterBarCount += lensBars.length;
     }
   }
 

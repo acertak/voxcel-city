@@ -116,7 +116,7 @@ test.describe("signals and scenery", () => {
     expect(result.streetscape).toMatchObject({
       elevatedSignCount: 13,
       vehicleSignalCount: 24,
-      removedCenterBarCount: 24,
+      removedCenterBarCount: 72,
       pedestrianSignalCount: 48,
       roadFacingPedestrianSignalCount: 48,
       stopLineCount: 24,
