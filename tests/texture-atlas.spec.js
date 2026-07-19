@@ -44,7 +44,7 @@ async function exitBuilding(page, building) {
   ))).toBe("city");
 }
 
-test.describe("shared detail texture atlas", () => {
+test.describe("shared texture atlases", () => {
   test("keeps solid-color characters playable after an image failure and allows a retry", async ({
     page,
   }) => {
@@ -119,35 +119,48 @@ test.describe("shared detail texture atlas", () => {
     });
   });
 
-  test("serves one compact atlas and shares it across characters and all exterior signs", async ({
+  test("shares the detail atlas across characters and the dedicated wide atlas across exterior signs", async ({
     page,
     request,
   }) => {
-    const response = await request.get("/images/voxcel-detail-atlas.jpg");
-    expect(response.ok()).toBe(true);
-    expect(response.headers()["content-type"]).toContain("image/jpeg");
-    expect((await response.body()).byteLength).toBeLessThan(125_000);
+    const detailResponse = await request.get("/images/voxcel-detail-atlas.jpg");
+    expect(detailResponse.ok()).toBe(true);
+    expect(detailResponse.headers()["content-type"]).toContain("image/jpeg");
+    expect((await detailResponse.body()).byteLength).toBeLessThan(125_000);
+
+    const signResponse = await request.get("/images/voxcel-sign-atlas.png");
+    expect(signResponse.ok()).toBe(true);
+    expect(signResponse.headers()["content-type"]).toContain("image/png");
+    expect((await signResponse.body()).byteLength).toBeLessThan(300_000);
 
     await startGame(page);
     const result = await page.evaluate(() => {
       const atlasState = window.__voxcelTextureAtlas.getState();
+      const signAtlasState = window.__voxcelSignAtlas.getState();
       const enhancementState = window.__voxcelEnhancements.getState();
       const characterState = window.__voxcelCharacters.getState();
-      const signs = window.__voxcelPlayer.buildings.map((building) => {
+      const buildingSigns = window.__voxcelPlayer.buildings.map((building) => {
         const sign = window.__voxcelPlayer.buildingViews[building.id].sign;
         const image = sign.material.map?.image;
+        const rect = sign.geometry.userData.voxcelSignAtlasRect;
+        const width = image?.naturalWidth || image?.width || 0;
+        const height = image?.naturalHeight || image?.height || 0;
+        const pixelWidth = rect ? (rect.u1 - rect.u0) * width : 0;
+        const pixelHeight = rect ? Math.abs(rect.v1 - rect.v0) * height : 0;
         return {
           buildingId: building.id,
           name: sign.name,
-          tile: sign.userData.voxcelAtlasTile,
+          region: sign.userData.voxcelSignAtlasRegion,
           textureUuid: sign.material.map?.uuid,
           textureName: sign.material.map?.name,
-          width: image?.naturalWidth || image?.width || 0,
-          height: image?.naturalHeight || image?.height || 0,
+          width,
+          height,
           isCanvas: image instanceof HTMLCanvasElement,
-          geometryTile: sign.geometry.userData.voxcelAtlasTile,
+          geometryRegion: sign.geometry.userData.voxcelSignAtlasRegion,
+          pixelAspect: pixelHeight > 0 ? pixelWidth / pixelHeight : 0,
         };
       });
+      const signs = buildingSigns.filter(({ region }) => Boolean(region));
       const playerTextures = new Set();
       window.__voxcelCharacters.playerRoot.traverse((object) => {
         if (object.isMesh && object.material?.map) playerTextures.add(object.material.map.uuid);
@@ -157,17 +170,23 @@ test.describe("shared detail texture atlas", () => {
           .map((mesh) => mesh.material.map?.uuid)
           .filter(Boolean),
       );
-      const requests = performance.getEntriesByType("resource")
+      const detailRequests = performance.getEntriesByType("resource")
         .filter((entry) => entry.name.includes("voxcel-detail-atlas.jpg"));
+      const signRequests = performance.getEntriesByType("resource")
+        .filter((entry) => entry.name.includes("voxcel-sign-atlas.png"));
       return {
         atlasState,
+        signAtlasState,
         enhancementAtlas: enhancementState.atlas,
+        enhancementSignAtlas: enhancementState.signAtlas,
         characterTextureUuid: characterState.resources.sharedAtlasTexture,
         signs,
+        officeSign: buildingSigns.find(({ buildingId }) => buildingId === "office") || null,
         signTextureCount: new Set(signs.map(({ textureUuid }) => textureUuid)).size,
         playerTextures: [...playerTextures],
         crowdTextures: [...crowdTextures],
-        atlasRequestCount: requests.length,
+        detailRequestCount: detailRequests.length,
+        signRequestCount: signRequests.length,
       };
     });
 
@@ -185,38 +204,122 @@ test.describe("shared detail texture atlas", () => {
       ready: true,
       error: null,
       tileCount: 64,
+      sharedTexture: true,
+    });
+    expect(result.signAtlasState).toMatchObject({
+      ready: true,
+      loading: false,
+      error: null,
+      width: 1024,
+      height: 512,
+      regionCount: 12,
+      textureUuid: expect.any(String),
+    });
+    expect(result.enhancementSignAtlas).toMatchObject({
+      status: "ready",
+      ready: true,
+      error: null,
+      width: 1024,
+      height: 512,
+      regionCount: 12,
       exteriorSignCount: 12,
+      appliedSignCount: 12,
       sharedTexture: true,
     });
     expect(result.signs).toHaveLength(12);
-    expect(result.signs.map(({ tile }) => tile)).toEqual([
-      "sign_convenience",
-      "sign_cafe",
-      "sign_bakery",
-      "sign_restaurant",
-      "sign_clothing",
-      "sign_salon",
-      "sign_furniture",
-      "sign_book",
-      "sign_hospital",
-      "sign_bank",
-      "sign_home",
-      "sign_police",
+    expect(result.officeSign).toMatchObject({ buildingId: "office" });
+    expect(result.officeSign.region).toBeFalsy();
+    expect(result.signs.map(({ region }) => region)).toEqual([
+      "exterior_convenience",
+      "exterior_cafe",
+      "exterior_bakery",
+      "exterior_restaurant",
+      "exterior_clothing",
+      "exterior_salon",
+      "exterior_furniture",
+      "exterior_book",
+      "exterior_hospital",
+      "exterior_bank",
+      "exterior_home",
+      "exterior_police",
     ]);
     expect(result.signTextureCount).toBe(1);
     expect(result.signs.every((sign) => (
       sign.name.startsWith("ExteriorSign:") &&
-      sign.textureName === "VoxcelDetailAtlas" &&
-      sign.width === 512 &&
+      sign.textureName === "VoxcelSignAtlas" &&
+      sign.width === 1024 &&
       sign.height === 512 &&
       !sign.isCanvas &&
-      sign.geometryTile === sign.tile
+      sign.geometryRegion === sign.region &&
+      sign.pixelAspect >= 6
     ))).toBe(true);
     expect(result.playerTextures).toEqual([result.atlasState.textureUuid]);
     expect(result.crowdTextures).toEqual([result.atlasState.textureUuid]);
     expect(result.characterTextureUuid).toBe(result.atlasState.textureUuid);
     expect(result.enhancementAtlas.textureUuid).toBe(result.atlasState.textureUuid);
-    expect(result.atlasRequestCount).toBe(1);
+    expect(result.enhancementSignAtlas.textureUuid).toBe(result.signAtlasState.textureUuid);
+    expect(result.signAtlasState.textureUuid).not.toBe(result.atlasState.textureUuid);
+    expect(result.signs.every(({ textureUuid }) => (
+      textureUuid === result.signAtlasState.textureUuid
+    ))).toBe(true);
+    expect(result.detailRequestCount).toBe(1);
+    expect(result.signRequestCount).toBe(1);
+  });
+
+  test("keeps the original canvas signs when only the dedicated sign atlas fails", async ({
+    page,
+  }) => {
+    await page.route("**/images/voxcel-sign-atlas.png", (route) => route.abort("failed"));
+    await startGame(page);
+
+    const fallback = await page.evaluate(() => {
+      const enhancementState = window.__voxcelEnhancements.getState();
+      const detailState = window.__voxcelTextureAtlas.getState();
+      const characterState = window.__voxcelCharacters.getState();
+      const signs = window.__voxcelPlayer.buildings
+        .filter((building) => building.id !== "office")
+        .map((building) => {
+          const sign = window.__voxcelPlayer.buildingViews[building.id].sign;
+          return {
+            textureName: sign.material.map?.name || "",
+            textureUuid: sign.material.map?.uuid || null,
+            isCanvas: sign.material.map?.image instanceof HTMLCanvasElement,
+            region: sign.userData.voxcelSignAtlasRegion || null,
+          };
+        });
+      return {
+        signAtlas: enhancementState.signAtlas,
+        detailAtlas: enhancementState.atlas,
+        detailState,
+        characterTextureUuid: characterState.resources.sharedAtlasTexture,
+        signs,
+      };
+    });
+
+    expect(fallback.signAtlas).toMatchObject({
+      status: "fallback",
+      ready: false,
+      error: expect.stringContaining("Could not load Voxcel sign atlas"),
+      width: 1024,
+      height: 512,
+      regionCount: 12,
+      exteriorSignCount: 0,
+      appliedSignCount: 0,
+      textureUuid: null,
+      sharedTexture: false,
+    });
+    expect(fallback.detailAtlas).toMatchObject({
+      status: "ready",
+      ready: true,
+      sharedTexture: true,
+      textureUuid: fallback.detailState.textureUuid,
+    });
+    expect(fallback.characterTextureUuid).toBe(fallback.detailState.textureUuid);
+    expect(fallback.signs).toHaveLength(12);
+    expect(fallback.signs.every(({ textureName, isCanvas, region }) => (
+      textureName !== "VoxcelSignAtlas" && isCanvas && region === null
+    ))).toBe(true);
+    expect(new Set(fallback.signs.map(({ textureUuid }) => textureUuid)).size).toBe(12);
   });
 
   test("replaces repeated bookstore, product, fashion, and salon boxes without leaking textures", async ({

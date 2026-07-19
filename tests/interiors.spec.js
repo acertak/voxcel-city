@@ -90,7 +90,7 @@ test.describe("spacious themed interiors", () => {
     expect(restored.player.z).toBeCloseTo(building.z - building.d / 2 - 2, 1);
   });
 
-  test("all twelve buildings use larger, distinct themed rooms and restore exterior sizes", async ({ page }) => {
+  test("all thirteen buildings use larger, distinct themed rooms and restore exterior sizes", async ({ page }) => {
     test.setTimeout(60_000);
     await startGame(page);
     const buildings = await page.evaluate(() => {

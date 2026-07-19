@@ -41,7 +41,7 @@ async function authorizeWithMycraft(request: Request, env: Env): Promise<Respons
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const ENHANCED_PLAYER_HANDLE =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,enterBuilding:c4,exitBuilding:ug,notify:PP}";
 const LEGACY_AVATAR_LOADER_ENABLED = false;
 
 function prepareAppShell(html: string): string {

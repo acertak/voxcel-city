@@ -7,11 +7,12 @@
 <link rel="icon" href="data:,">
 <link rel="preload" href="/models/modular-character-parts.glb" as="fetch" type="model/gltf-binary" crossorigin="anonymous">
 <link rel="preload" href="/images/voxcel-detail-atlas.jpg" as="image" type="image/jpeg" fetchpriority="high">
+<link rel="preload" href="/images/voxcel-sign-atlas.png" as="image" type="image/png">
 <style>
 :root{--panel:rgba(10,16,30,0.82);--border:rgba(255,255,255,0.14);--text:#eef4ff;--accent:#6fd4ff;--accent2:#ffd666;--pink:#ff7fc6;--green:#5ddb6a;--red:#ff6b6b}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:'Segoe UI',system-ui,sans-serif;color:var(--text);touch-action:none;user-select:none;overscroll-behavior:none}
-#app{position:fixed;inset:0}canvas{display:block;width:100%;height:100%}
+#app{position:fixed;inset:0}canvas{display:block;width:100%;height:100%;touch-action:none}
 .hud{position:fixed;top:10px;left:10px;display:flex;flex-direction:column;gap:6px;pointer-events:none;z-index:20}
 .hp{background:var(--panel);border:1px solid var(--border);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:12px;padding:8px 12px;pointer-events:auto;box-shadow:0 6px 24px rgba(0,0,0,0.3)}
 .ht{font-size:13px;font-weight:800;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
@@ -21,15 +22,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 .bb{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:8px;pointer-events:none;z-index:20}
 .ib{pointer-events:auto;padding:12px 22px;border-radius:14px;border:1px solid rgba(255,255,255,0.2);background:linear-gradient(135deg,rgba(111,212,255,0.35),rgba(255,214,102,0.3));color:white;font-size:14px;font-weight:800;backdrop-filter:blur(10px);cursor:pointer;display:none;box-shadow:0 6px 20px rgba(0,0,0,0.3);white-space:nowrap}
 .ib:active{transform:scale(.95)}.ib.show{display:block}
-.touch-layer{position:fixed;inset:auto 0 0 0;z-index:25;display:none;pointer-events:none;padding:14px 18px 20px;justify-content:space-between;align-items:flex-end;gap:16px}
+.touch-layer{position:fixed;inset:0;z-index:10;display:none;pointer-events:none}
 .touch-layer.show{display:flex}
-.stick-pad{position:relative;width:132px;height:132px;pointer-events:auto;touch-action:none;flex:0 0 auto}
-.stick-pad::before{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid rgba(255,255,255,0.18);background:radial-gradient(circle at 50% 50%,rgba(255,255,255,0.10),rgba(255,255,255,0.03) 58%,rgba(0,0,0,0.12));box-shadow:inset 0 0 24px rgba(255,255,255,0.05),0 10px 28px rgba(0,0,0,0.25)}
-.stick-pad::after{content:attr(data-label);position:absolute;left:50%;bottom:10px;transform:translateX(-50%);font-size:10px;font-weight:900;letter-spacing:.14em;color:rgba(255,255,255,0.66)}
-.stick-pad.active::before{border-color:rgba(111,212,255,0.6);background:radial-gradient(circle at 50% 50%,rgba(111,212,255,0.12),rgba(255,255,255,0.03) 58%,rgba(0,0,0,0.14))}
-.stick-knob{position:absolute;left:50%;top:50%;width:54px;height:54px;border-radius:50%;transform:translate(calc(-50% + var(--dx,0px)),calc(-50% + var(--dy,0px)));background:linear-gradient(135deg,rgba(111,212,255,0.34),rgba(255,214,102,0.34));border:1px solid rgba(255,255,255,0.24);box-shadow:0 8px 18px rgba(0,0,0,0.24),inset 0 0 14px rgba(255,255,255,0.10)}
-.stick-pad.right .stick-knob{background:linear-gradient(135deg,rgba(255,214,102,0.32),rgba(255,127,198,0.22))}
-.stick-hint{position:absolute;left:50%;top:10px;transform:translateX(-50%);font-size:11px;font-weight:800;opacity:.55;letter-spacing:.08em;white-space:nowrap}
+.touch-zone{width:50%;height:100%;pointer-events:auto;touch-action:none}
+.touch-control-anchor{display:none}
 .mo{position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(10px);z-index:100;display:none;align-items:center;justify-content:center;padding:12px;overflow-y:auto}.mo.show{display:flex}
 .md{background:rgba(12,18,32,0.96);border:1px solid var(--border);border-radius:18px;padding:16px;max-width:560px;width:100%;max-height:82vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.5)}
 .md::-webkit-scrollbar{width:4px}.md::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:9px}
@@ -79,7 +75,7 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 /* Interaction marker floating over objects */
 .marker3d{position:absolute;pointer-events:none;z-index:15;font-size:11px;font-weight:700;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:3px 10px;color:var(--accent);backdrop-filter:blur(8px);white-space:nowrap;opacity:0;transition:opacity .2s}.marker3d.show{opacity:1}
 @media(max-width:600px){.ig{grid-template-columns:repeat(auto-fill,minmax(85px,1fr))}.md{padding:12px}}
-@media(max-width:600px){.touch-layer{padding:10px 12px 14px}.stick-pad{width:112px;height:112px}.stick-knob{width:46px;height:46px}.mm{top:8px;right:8px}.mm canvas{width:96px;height:96px}.tc.sc{top:42px;max-width:210px;padding:5px 10px;gap:6px;flex-wrap:wrap;justify-content:center}.sc .sn.timer{min-width:auto;font-size:9px}.wc{top:72px;max-width:220px;padding:5px 10px;gap:8px}.star{font-size:13px}.wtx{font-size:9px;min-width:auto}}
+@media(max-width:600px){.mm{top:8px;right:8px}.mm canvas{width:96px;height:96px}.tc.sc{top:42px;max-width:210px;padding:5px 10px;gap:6px;flex-wrap:wrap;justify-content:center}.sc .sn.timer{min-width:auto;font-size:9px}.wc{top:72px;max-width:220px;padding:5px 10px;gap:8px}.star{font-size:13px}.wtx{font-size:9px;min-width:auto}}
 </style>
 </head>
 <body>
@@ -92,7 +88,7 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 🛋️ 家具屋で買って自宅に配置<br>🏠 自宅でクローゼット・冷蔵庫・ベッドを使おう<br>
 🚗 車や人が行き交う街を探索・🌅 昼夜サイクル<br>
 🚓 違反すると指名手配、逮捕されると牢屋で1日過ごす<br>
-📱 左下スティックで移動 / 右下スティックで視点
+📱 画面左半分をドラッグして移動 / 右半分をドラッグして視点移動
 </div>
 <button class="sb2" id="goBtn">ゲーム開始</button>
 <div style="margin-top:10px;font-size:10px;opacity:.4">WASD移動 / 車ではWASD運転 / マウス視点 / E操作</div>
@@ -110,15 +106,9 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 <div class="ll" id="lL"></div>
 <div class="mm" id="mmC"><canvas id="mmV" width="130" height="130"></canvas></div>
 <div class="bb"><button class="ib" id="iBtn">E</button></div>
-<div class="touch-layer" id="touchLayer">
-  <div class="stick-pad left" id="movePad" data-label="MOVE">
-    <div class="stick-hint">移動</div>
-    <div class="stick-knob" id="moveKnob"></div>
-  </div>
-  <div class="stick-pad right" id="lookPad" data-label="LOOK">
-    <div class="stick-hint">視点</div>
-    <div class="stick-knob" id="lookKnob"></div>
-  </div>
+<div class="touch-layer" id="touchLayer" aria-hidden="true">
+  <div class="touch-zone" id="movePad"><span class="touch-control-anchor" id="moveKnob"></span></div>
+  <div class="touch-zone" id="lookPad"><span class="touch-control-anchor" id="lookKnob"></span></div>
 </div>
 <div class="toast" id="toast"></div>
 <div class="arrest-ov" id="arrestOv"><div class="arrest-fade" id="arrestFade"></div><div class="jail-hud" id="jailHud"><h2>🔒 留置所</h2><div class="jt" id="jailTime">23:59</div><div class="jm">釈放まで待機中...</div></div></div>
@@ -3817,7 +3807,9 @@ void main() {
 </script>
 <!-- Legacy inline avatar removed; modular-character-system.js owns characters. -->
 <script src="/texture-atlas-system.js"></script>
+<script src="/city-world-system.js"></script>
 <script src="/world-enhancements.js"></script>
+<script src="/city-map-system.js"></script>
 <script type="module" src="/modular-character-system.js"></script>
 </body>
 </html>

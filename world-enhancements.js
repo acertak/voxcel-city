@@ -7,19 +7,19 @@
   const SWEEP_STEP = 0.12;
   const COLLIDER_REFRESH_MS = 750;
 
-  const exteriorSignTiles = {
-    conv: "sign_convenience",
-    cafe: "sign_cafe",
-    bake: "sign_bakery",
-    rest: "sign_restaurant",
-    cloth: "sign_clothing",
-    salon: "sign_salon",
-    furn: "sign_furniture",
-    book: "sign_book",
-    hosp: "sign_hospital",
-    bank: "sign_bank",
-    home: "sign_home",
-    police: "sign_police",
+  const exteriorSignRegions = {
+    conv: "exterior_convenience",
+    cafe: "exterior_cafe",
+    bake: "exterior_bakery",
+    rest: "exterior_restaurant",
+    cloth: "exterior_clothing",
+    salon: "exterior_salon",
+    furn: "exterior_furniture",
+    book: "exterior_book",
+    hosp: "exterior_hospital",
+    bank: "exterior_bank",
+    home: "exterior_home",
+    police: "exterior_police",
   };
 
   const garmentAtlasTiles = [
@@ -67,6 +67,7 @@
     bank: { background: 0x10151d, wall: 0xdce3eb, accent: 0x46688f, floor: 0x465361 },
     home: { background: 0x17140f, wall: 0xeadfca, accent: 0x8b6b48, floor: 0x6b513b },
     police: { background: 0x0d1219, wall: 0xd5dde7, accent: 0x355b82, floor: 0x3f4a58 },
+    office: { background: 0x0b1119, wall: 0xe1e8ee, accent: 0x356d92, floor: 0x465868 },
     default: { background: 0x11161b, wall: 0xdde2e5, accent: 0x537082, floor: 0x4b555c },
   };
 
@@ -83,6 +84,7 @@
     bank: { width: 22, depth: 20, height: 7, themeId: "bank", preserveNative: false },
     home: { width: 24, depth: 24, height: 6.6, themeId: "home", preserveNative: true },
     police: { width: 24, depth: 22, height: 7, themeId: "police-station", preserveNative: true },
+    office: { width: 30, depth: 26, height: 7.2, themeId: "office-tower", preserveNative: false },
   };
 
   const runtime = {
@@ -130,11 +132,19 @@
     beforeRenderCallbacks: new Set(),
     atlasStatus: "idle",
     atlasError: null,
+    signAtlasStatus: "idle",
+    signAtlasError: null,
     exteriorAtlasSignCount: 0,
     interiorAtlasVisualCount: 0,
     bookStripCount: 0,
     productStripCount: 0,
     garmentTextureCount: 0,
+    interiorFixtureRoot: null,
+    activeInteriorMaterials: null,
+    activeInteriorProfile: null,
+    officeFloor: 1,
+    officeFloorCount: 50,
+    officeFloorVariant: "lobby",
   };
 
   function findPrototypeConstructor(object, methodName) {
@@ -293,6 +303,7 @@
     };
 
     let atlasTexture = null;
+    let signAtlasTexture = null;
     let interiorAtlasMaterialCache = {
       neutral: new WeakMap(),
       tinted: new WeakMap(),
@@ -304,25 +315,48 @@
     }
 
     const atlasApi = window.__voxcelTextureAtlas;
-    if (atlasApi?.getTexture && constructors.Texture) {
-      runtime.atlasStatus = "loading";
+    const signAtlasApi = window.__voxcelSignAtlas;
+
+    async function loadSharedAtlas(api, statusKey, errorKey, unavailableError, warning) {
+      if (!api?.getTexture || !constructors.Texture) {
+        runtime[statusKey] = "fallback";
+        runtime[errorKey] = unavailableError;
+        return null;
+      }
+      runtime[statusKey] = "loading";
       try {
-        atlasTexture = await atlasApi.getTexture({
+        const loadedTexture = await api.getTexture({
           TextureConstructor: constructors.Texture,
           referenceTexture: canvasTexture,
           renderer,
         });
-        runtime.atlasStatus = "ready";
-        runtime.atlasError = null;
+        runtime[statusKey] = "ready";
+        runtime[errorKey] = null;
+        return loadedTexture;
       } catch (error) {
-        runtime.atlasStatus = "fallback";
-        runtime.atlasError = error instanceof Error ? error.message : String(error);
-        console.warn("Voxcel detail atlas could not be loaded; using solid-color fallbacks.", error);
+        runtime[statusKey] = "fallback";
+        runtime[errorKey] = error instanceof Error ? error.message : String(error);
+        console.warn(warning, error);
+        return null;
       }
-    } else {
-      runtime.atlasStatus = "fallback";
-      runtime.atlasError = "texture-atlas-runtime-unavailable";
     }
+
+    [atlasTexture, signAtlasTexture] = await Promise.all([
+      loadSharedAtlas(
+        atlasApi,
+        "atlasStatus",
+        "atlasError",
+        "texture-atlas-runtime-unavailable",
+        "Voxcel detail atlas could not be loaded; using solid-color fallbacks.",
+      ),
+      loadSharedAtlas(
+        signAtlasApi,
+        "signAtlasStatus",
+        "signAtlasError",
+        "sign-atlas-runtime-unavailable",
+        "Voxcel sign atlas could not be loaded; keeping the original sign textures.",
+      ),
+    ]);
 
     function isPlayerObject(object) {
       let current = object;
@@ -695,6 +729,31 @@
       return geometry;
     }
 
+    function applySignAtlasUv(geometry, regionName) {
+      const uv = geometry.getAttribute?.("uv");
+      if (!signAtlasTexture || !signAtlasApi?.getUvRect || !uv) return false;
+      const rect = signAtlasApi.getUvRect(regionName, 4);
+      for (let index = 0; index < uv.count; index += 1) {
+        const localU = uv.getX(index);
+        const localV = uv.getY(index);
+        uv.setXY(
+          index,
+          rect.u0 + localU * (rect.u1 - rect.u0),
+          rect.v1 - localV * (rect.v1 - rect.v0),
+        );
+      }
+      uv.needsUpdate = true;
+      geometry.userData.voxcelSignAtlasRegion = regionName;
+      geometry.userData.voxcelSignAtlasRect = rect;
+      return true;
+    }
+
+    function createSignAtlasBoxGeometry(size, regionName) {
+      const geometry = new constructors.BoxGeometry(size[0], size[1], size[2]);
+      applySignAtlasUv(geometry, regionName);
+      return geometry;
+    }
+
     function atlasMaterialFor(material, preserveTint = false) {
       if (!atlasTexture) return material;
       const cache = preserveTint
@@ -719,33 +778,37 @@
     }
 
     function enhanceExteriorSigns() {
-      if (!atlasTexture) return;
+      if (!signAtlasTexture) return;
       runtime.exteriorAtlasSignCount = 0;
       for (const building of buildings) {
         const sign = handle.buildingViews?.[building.id]?.sign;
-        const tile = exteriorSignTiles[building.id];
+        const regionName = exteriorSignRegions[building.id];
         const parameters = sign?.geometry?.parameters;
-        if (!sign?.isMesh || !tile || !parameters) continue;
-        if (sign.material?.map === atlasTexture && sign.userData.voxcelAtlasTile === tile) {
+        if (!sign?.isMesh || !regionName || !parameters) continue;
+        if (
+          sign.material?.map === signAtlasTexture &&
+          sign.userData.voxcelSignAtlasRegion === regionName
+        ) {
           runtime.exteriorAtlasSignCount += 1;
           continue;
         }
         const previousGeometry = sign.geometry;
         const previousTexture = sign.material?.map;
-        sign.geometry = createAtlasBoxGeometry(
+        sign.geometry = createSignAtlasBoxGeometry(
           [parameters.width, parameters.height, parameters.depth],
-          tile,
-          { contain: true },
+          regionName,
         );
         previousGeometry.dispose();
-        if (previousTexture && previousTexture !== atlasTexture) previousTexture.dispose();
-        sign.material.map = atlasTexture;
+        if (previousTexture?.image instanceof HTMLCanvasElement) previousTexture.dispose();
+        sign.material.map = signAtlasTexture;
         sign.material.color?.setHex(0xffffff);
         sign.material.roughness = 0.72;
         sign.material.needsUpdate = true;
         sign.name = `ExteriorSign:${building.id}`;
-        sign.userData.voxcelAtlasTile = tile;
-        sign.userData.voxcelAtlasTexture = atlasTexture.uuid;
+        delete sign.userData.voxcelAtlasTile;
+        delete sign.userData.voxcelAtlasTexture;
+        sign.userData.voxcelSignAtlasRegion = regionName;
+        sign.userData.voxcelSignAtlasTexture = signAtlasTexture.uuid;
         runtime.exteriorAtlasSignCount += 1;
       }
     }
@@ -832,6 +895,7 @@
         black: makeMaterial(0x25272b, { roughness: 0.7 }),
         metal: makeMaterial(0x7d8990, { roughness: 0.38, metalness: 0.58 }),
         glass: makeMaterial(0x9edbe0, { roughness: 0.18, transparent: true, opacity: 0.3 }),
+        partitionGlass: makeMaterial(0x9edbe0, { roughness: 0.18, transparent: true, opacity: 0.52 }),
         green: makeMaterial(0x4f7d57, { roughness: 0.78 }),
         blue: makeMaterial(0x527fa2, { roughness: 0.76 }),
         red: makeMaterial(0xa94f47, { roughness: 0.78 }),
@@ -1684,6 +1748,179 @@
       addPendantLights(group, building, profile, materials, [[-4, 1], [3.5, 1], [0, -6]]);
     }
 
+    function officeFloorVariant(floor) {
+      if (floor === 1) return "lobby";
+      if (floor === runtime.officeFloorCount) return "executive";
+      return "general";
+    }
+
+    function addOfficeMonitor(group, building, name, x, z, materials, rotationY = 0) {
+      makeFixtureBox(
+        group,
+        building,
+        `${name}:screen`,
+        [0.95, 0.62, 0.12],
+        [x, 1.32, z],
+        materials.black,
+        "workstation-monitor",
+        { rotationY, solid: false },
+      );
+      makeFixtureBox(
+        group,
+        building,
+        `${name}:stand`,
+        [0.12, 0.34, 0.12],
+        [x, 1.02, z],
+        materials.metal,
+        "workstation-monitor",
+        { rotationY, solid: false },
+      );
+    }
+
+    function addOfficeElevatorBank(group, building, materials, floor) {
+      makeFixtureBox(
+        group,
+        building,
+        "OfficeElevator:feature-wall",
+        [8.7, 4.65, 0.24],
+        [9.4, 2.33, 12.72],
+        materials.darkWood,
+        "elevator",
+      );
+      for (let elevator = 0; elevator < 3; elevator += 1) {
+        const x = 6.8 + elevator * 2.6;
+        makeFixtureBox(
+          group,
+          building,
+          `OfficeElevator:${elevator}:door`,
+          [2.05, 3.25, 0.16],
+          [x, 1.63, 12.54],
+          materials.metal,
+          "elevator-door",
+          { solid: false },
+        );
+        makeFixtureBox(
+          group,
+          building,
+          `OfficeElevator:${elevator}:indicator`,
+          [0.8, 0.38, 0.09],
+          [x, 3.65, 12.42],
+          floor === runtime.officeFloorCount ? materials.mustard : materials.blue,
+          "elevator-indicator",
+          { solid: false },
+        );
+      }
+      makeFixtureBox(
+        group,
+        building,
+        "OfficeElevator:call-panel",
+        [0.28, 0.82, 0.1],
+        [5.37, 1.3, 12.35],
+        materials.black,
+        "elevator-call-panel",
+        { solid: false },
+      );
+      addRug(group, building, "OfficeElevator:lobby-rug", [9.6, 4.2], [9.4, 10.1], materials.blue, "elevator-lobby");
+    }
+
+    function buildOfficeLobby(group, building, profile, materials) {
+      addRug(group, building, "OfficeLobby:rug", [10.5, 7.2], [0, -7.2], materials.blue, "office-lobby");
+      addCounter(
+        group,
+        building,
+        { name: "OfficeReception", x: 0, z: -6.2, width: 7.4, depth: 1.5, role: "office-reception", material: materials.blue },
+        materials,
+      );
+      makeFixtureBox(group, building, "OfficeReception:logo", [5.8, 0.82, 0.08], [0, 3.2, -12.72], materials.mustard, "office-directory", { solid: false });
+
+      for (const [index, x] of [-4.1, -1.35, 1.35, 4.1].entries()) {
+        makeFixtureBox(group, building, `SecurityGate:${index}:post`, [0.32, 1.1, 1.45], [x, 0.56, -1.2], materials.metal, "security-gate");
+        makeFixtureBox(group, building, `SecurityGate:${index}:glass`, [2.15, 0.72, 0.08], [x + 1.08, 0.78, -1.2], materials.glass, "security-gate", { solid: false });
+      }
+
+      addSofa(group, building, "OfficeLobby:sofa-west", [-9.6, -6.4], 4.8, materials.teal, "office-waiting");
+      addSofa(group, building, "OfficeLobby:sofa-east", [9.2, -6.4], 4.2, materials.blue, "office-waiting");
+      addTable(group, building, "OfficeLobby:coffee-table", [-9.6, -3.8], [2.8, 1.4], materials, "office-waiting-table");
+      makeFixtureBox(group, building, "OfficeDirectory", [4.4, 3.1, 0.35], [-10.8, 1.58, 7.5], materials.darkWood, "office-directory");
+      for (let line = 0; line < 5; line += 1) {
+        makeFixtureBox(group, building, `OfficeDirectory:line:${line}`, [3.45, 0.18, 0.08], [-10.8, 2.55 - line * 0.48, 7.28], line === 0 ? materials.mustard : materials.cream, "office-directory", { solid: false });
+      }
+      addOfficeElevatorBank(group, building, materials, 1);
+      addPendantLights(group, building, profile, materials, [[-8, -6], [0, -4], [8, -6], [-6, 5], [7, 7]]);
+    }
+
+    function addOfficeWorkstation(group, building, materials, index, x, z) {
+      addTable(group, building, `Workstation:${index}`, [x, z], [3.25, 1.5], materials, "workstation");
+      addSeat(group, building, `Workstation:${index}:chair`, [x, z + 1.35], index % 2 ? materials.blue : materials.teal, "office-chair", Math.PI);
+      addOfficeMonitor(group, building, `Workstation:${index}:monitor`, x, z - 0.18, materials);
+      makeFixtureBox(group, building, `Workstation:${index}:divider`, [3.15, 0.72, 0.09], [x, 1.2, z - 0.72], materials.paleAccent, "workstation-divider", { solid: false });
+    }
+
+    function buildOfficeGeneralFloor(group, building, profile, materials, floor) {
+      addRug(group, building, "OfficeWorkArea:rug", [17.2, 14.6], [2.3, -2.2], materials.blue, "open-office");
+      const deskPositions = [
+        [-3.5, -6.5], [1.4, -6.5], [6.3, -6.5],
+        [-3.5, -1.7], [1.4, -1.7], [6.3, -1.7],
+      ];
+      deskPositions.forEach(([x, z], index) => addOfficeWorkstation(group, building, materials, index, x, z));
+
+      makeFixtureBox(group, building, "MeetingRoom:glass-east", [0.14, 3.25, 8.2], [-4.9, 1.63, 7.1], materials.partitionGlass, "meeting-room");
+      makeFixtureBox(group, building, "MeetingRoom:glass-south", [6.2, 3.25, 0.14], [-10.5, 1.63, 3.0], materials.partitionGlass, "meeting-room");
+      addTable(group, building, "MeetingRoom:table", [-9.4, 7.3], [5.8, 2.2], materials, "meeting-room-table");
+      for (const [index, x, z] of [
+        [0, -12.2, 7.3], [1, -6.6, 7.3], [2, -10.7, 5.6],
+        [3, -8.1, 5.6], [4, -10.7, 9.0], [5, -8.1, 9.0],
+      ]) {
+        addSeat(group, building, `MeetingRoom:chair:${index}`, [x, z], materials.cream, "meeting-room-chair", index < 2 ? Math.PI / 2 : 0);
+      }
+
+      makeFixtureBox(group, building, "OfficePantry:counter", [6.4, 1.05, 1.35], [-9.2, 0.55, -10.6], materials.white, "office-pantry");
+      makeFixtureBox(group, building, "OfficePantry:coffee", [0.85, 1.15, 0.7], [-10.5, 1.45, -10.6], materials.black, "office-pantry", { solid: false });
+      makeFixtureBox(group, building, "OfficeCopyArea:copier", [1.55, 1.45, 1.25], [10.8, 0.73, -5.6], materials.white, "copy-area");
+      addOfficeElevatorBank(group, building, materials, floor);
+      addPendantLights(group, building, profile, materials, [[-8, -5], [0, -5], [8, -5], [-8, 6], [1, 5], [9, 7]]);
+    }
+
+    function buildOfficeExecutiveFloor(group, building, profile, materials) {
+      addRug(group, building, "ExecutiveLobby:rug", [10.5, 6.4], [5.0, 6.0], materials.mustard, "executive-lobby");
+      addCounter(group, building, { name: "ExecutiveReception", x: 2.8, z: 4.4, width: 5.4, role: "executive-reception", material: materials.mustard }, materials);
+
+      makeFixtureBox(group, building, "Boardroom:glass-south", [9.7, 3.4, 0.14], [-9.15, 1.7, 2.2], materials.partitionGlass, "boardroom");
+      makeFixtureBox(group, building, "Boardroom:glass-east", [0.14, 3.4, 9.4], [-1.55, 1.7, 6.8], materials.partitionGlass, "boardroom");
+      addTable(group, building, "Boardroom:table", [-8.1, 7.2], [8.2, 2.8], materials, "boardroom-table");
+      for (const [index, x, z] of [
+        [0, -12.1, 7.2], [1, -4.1, 7.2], [2, -10.7, 5.2], [3, -8.1, 5.2],
+        [4, -5.5, 5.2], [5, -10.7, 9.2], [6, -8.1, 9.2], [7, -5.5, 9.2],
+      ]) {
+        addSeat(group, building, `Boardroom:chair:${index}`, [x, z], materials.black, "boardroom-chair", index < 2 ? Math.PI / 2 : 0);
+      }
+
+      addTable(group, building, "ExecutiveDesk", [8.3, -2.8], [5.5, 2.2], materials, "executive-office");
+      addSeat(group, building, "ExecutiveDesk:chair", [8.3, -1.1], materials.black, "executive-chair", Math.PI);
+      addOfficeMonitor(group, building, "ExecutiveDesk:monitor", 8.3, -3.1, materials);
+      makeFixtureBox(group, building, "ExecutiveOffice:divider", [0.16, 3.2, 9.2], [3.8, 1.6, -4.6], materials.partitionGlass, "executive-office");
+
+      addRug(group, building, "ExecutiveLounge:rug", [9.4, 6.2], [-8.7, -6.8], materials.teal, "executive-lounge");
+      addSofa(group, building, "ExecutiveLounge:sofa", [-9.5, -7.3], 5.3, materials.teal, "executive-lounge");
+      addTable(group, building, "ExecutiveLounge:table", [-9.5, -4.7], [3.2, 1.55], materials, "executive-lounge");
+      addOfficeElevatorBank(group, building, materials, runtime.officeFloorCount);
+      addPendantLights(group, building, profile, materials, [[-9, -6], [7, -3], [-8, 7], [4, 6], [10, 8]]);
+    }
+
+    function buildOfficeFloor(group, building, profile, materials, floor = runtime.officeFloor) {
+      const variant = officeFloorVariant(floor);
+      runtime.officeFloorVariant = variant;
+      group.userData.voxcelOfficeFloor = floor;
+      group.userData.voxcelOfficeFloorVariant = variant;
+      if (variant === "lobby") buildOfficeLobby(group, building, profile, materials);
+      else if (variant === "executive") buildOfficeExecutiveFloor(group, building, profile, materials);
+      else buildOfficeGeneralFloor(group, building, profile, materials, floor);
+    }
+
+    function buildOfficeTower(group, building, profile, materials) {
+      buildOfficeFloor(group, building, profile, materials, runtime.officeFloor);
+    }
+
     const interiorBuilders = {
       conv: buildConvenienceStore,
       cafe: buildCafe,
@@ -1697,6 +1934,7 @@
       bank: buildBank,
       home: buildHome,
       police: buildPoliceStation,
+      office: buildOfficeTower,
     };
 
     function createInteriorScene(building) {
@@ -1783,6 +2021,7 @@
         bank: 0x596676,
         home: 0x76583f,
         police: 0x4d5967,
+        office: 0x526776,
       };
       const floorMaterial = makeMaterial(floorColors[building.id] || palette.floor, { roughness: 0.94 });
       const ceilingMaterial = makeMaterial(0xf3eee6, { roughness: 0.96 });
@@ -1855,7 +2094,17 @@
       const materials = createInteriorMaterials(palette);
       (interiorBuilders[building.id] || (() => {}))(fixtureRoot, building, profile, materials);
 
-      return { interior, ownedRoot, shell, shellSides, ceiling, wallHeight, profile };
+      return {
+        interior,
+        ownedRoot,
+        shell,
+        shellSides,
+        ceiling,
+        wallHeight,
+        profile,
+        fixtureRoot,
+        materials,
+      };
     }
 
     function isInteriorContent(object, building) {
@@ -1993,7 +2242,93 @@
       runtime.policeJailCellSnapshot = null;
     }
 
+    function clearOfficeFloorFixtures() {
+      const root = runtime.interiorFixtureRoot;
+      if (!root) return;
+      const geometries = new Set();
+      root.traverse((object) => {
+        if (object !== root && object.geometry) geometries.add(object.geometry);
+      });
+      root.clear();
+      geometries.forEach((geometry) => geometry.dispose());
+      runtime.themeFixtureCount = 0;
+      runtime.fixtureRoles.clear();
+      runtime.interiorAtlasVisualCount = 0;
+      runtime.bookStripCount = 0;
+      runtime.productStripCount = 0;
+      runtime.garmentTextureCount = 0;
+    }
+
+    function setOfficeExitAvailability(floor) {
+      const points = handle.buildingViews?.office?.interiorPts || [];
+      const exitPoint = points.find((point) => point.action === "exit");
+      if (!exitPoint) return;
+      const saved = runtime.originalInteractionPositions.find((entry) => entry.point === exitPoint);
+      if (!saved) return;
+      if (floor === 1) {
+        const originalDepth = runtime.originalBuildingDimensions?.d || runtime.activeBuilding?.d || 0;
+        const profileDepth = runtime.activeInteriorProfile?.depth || runtime.roomDimensions?.depth || originalDepth;
+        exitPoint.pos.set(saved.x, saved.y, saved.z - (profileDepth - originalDepth) / 2);
+      } else {
+        exitPoint.pos.set(saved.x, 10000, saved.z);
+      }
+    }
+
+    function movePlayerNearOfficeElevator() {
+      const point = handle.buildingViews?.office?.interiorPts?.find(
+        (candidate) => candidate.action === "office-elevator",
+      );
+      if (!point) return;
+      const targetX = point.pos.x;
+      const targetZ = point.pos.z - 2.05;
+      const deltaX = targetX - playerRoot.position.x;
+      const deltaZ = targetZ - playerRoot.position.z;
+      playerRoot.position.x = targetX;
+      playerRoot.position.z = targetZ;
+      playerShadow.position.x += deltaX;
+      playerShadow.position.z += deltaZ;
+      camera.position.x += deltaX;
+      camera.position.z += deltaZ;
+      runtime.lastPosition.copy(playerRoot.position);
+      runtime.acceptNextMove = true;
+    }
+
+    function setOfficeFloor(requestedFloor) {
+      if (runtime.activeBuilding?.id !== "office" || !runtime.interiorFixtureRoot) return false;
+      const numericFloor = Number(requestedFloor);
+      if (!Number.isFinite(numericFloor)) return false;
+      const floor = Math.max(1, Math.min(runtime.officeFloorCount, Math.round(numericFloor)));
+      if (floor === runtime.officeFloor && runtime.interiorFixtureRoot.children.length) {
+        setOfficeExitAvailability(floor);
+        return true;
+      }
+
+      clearOfficeFloorFixtures();
+      runtime.officeFloor = floor;
+      runtime.officeFloorVariant = officeFloorVariant(floor);
+      buildOfficeFloor(
+        runtime.interiorFixtureRoot,
+        runtime.activeBuilding,
+        runtime.activeInteriorProfile,
+        runtime.activeInteriorMaterials,
+        floor,
+      );
+      setOfficeExitAvailability(floor);
+      movePlayerNearOfficeElevator();
+      playSceneTransition();
+      refreshColliderRegistry(performance.now(), true);
+      handle.notify?.(`🛗 シティオフィスタワー ${floor}階`);
+      window.dispatchEvent(new CustomEvent("voxcel:office-floor-changed", {
+        detail: { floor, floorCount: runtime.officeFloorCount, variant: runtime.officeFloorVariant },
+      }));
+      return true;
+    }
+
     function enterInterior(building) {
+      if (building.id === "office") {
+        runtime.officeFloor = 1;
+        runtime.officeFloorVariant = "lobby";
+      }
       runtime.originalBuildingDimensions = { w: building.w, d: building.d, h: building.h };
       runtime.originalInteractionPositions = [];
       runtime.themeFixtureCount = 0;
@@ -2016,6 +2351,9 @@
       runtime.shellSides = created.shellSides;
       runtime.ceiling = created.ceiling;
       runtime.wallHeight = created.wallHeight;
+      runtime.interiorFixtureRoot = created.fixtureRoot;
+      runtime.activeInteriorMaterials = created.materials;
+      runtime.activeInteriorProfile = created.profile;
       runtime.roomDimensions = {
         width: created.profile.width,
         depth: created.profile.depth,
@@ -2047,6 +2385,7 @@
       const entryShiftZ = -(created.profile.depth - building.d) / 2;
       const exitPoint = points.find((point) => point.action === "exit");
       if (exitPoint) exitPoint.pos.z += entryShiftZ;
+      if (building.id === "office") setOfficeExitAvailability(1);
       if (arrivedThroughEntrance) {
         playerRoot.position.z += entryShiftZ;
         playerShadow.position.z += entryShiftZ;
@@ -2122,6 +2461,9 @@
       runtime.shellSides = null;
       runtime.ceiling = null;
       runtime.wallHeight = 0;
+      runtime.interiorFixtureRoot = null;
+      runtime.activeInteriorMaterials = null;
+      runtime.activeInteriorProfile = null;
       runtime.activeBuilding = null;
       runtime.roomDimensions = null;
       runtime.themeId = null;
@@ -2546,6 +2888,7 @@
     function publicState() {
       const altitudes = runtime.cloudGroups.map((cloud) => cloud.object.position.y);
       const atlasState = atlasApi?.getState?.() || {};
+      const signAtlasState = signAtlasApi?.getState?.() || {};
       runtime.legacySurfaceCount = countLegacyRoomSurfaces();
       return {
         ready: runtime.ready,
@@ -2573,12 +2916,33 @@
           url: atlasState.url || atlasApi?.url || null,
           tileCount: atlasState.tileCount || Object.keys(atlasApi?.tiles || {}).length,
           textureUuid: atlasTexture?.uuid || atlasState.textureUuid || null,
-          exteriorSignCount: runtime.exteriorAtlasSignCount,
           interiorVisualCount: runtime.interiorAtlasVisualCount,
           bookStripCount: runtime.bookStripCount,
           productStripCount: runtime.productStripCount,
           garmentTextureCount: runtime.garmentTextureCount,
           sharedTexture: Boolean(atlasTexture),
+        },
+        office: {
+          active: runtime.activeBuilding?.id === "office",
+          floor: runtime.officeFloor,
+          currentFloor: runtime.officeFloor,
+          floorCount: runtime.officeFloorCount,
+          variant: runtime.officeFloorVariant,
+          exitAvailable: runtime.activeBuilding?.id === "office" && runtime.officeFloor === 1,
+          loadedFloorCount: runtime.activeBuilding?.id === "office" ? 1 : 0,
+        },
+        signAtlas: {
+          status: runtime.signAtlasStatus,
+          ready: runtime.signAtlasStatus === "ready",
+          error: runtime.signAtlasError || signAtlasState.error || null,
+          url: signAtlasState.url || signAtlasApi?.url || null,
+          width: signAtlasState.width || signAtlasApi?.width || 0,
+          height: signAtlasState.height || signAtlasApi?.height || 0,
+          regionCount: signAtlasState.regionCount || Object.keys(signAtlasApi?.regions || {}).length,
+          textureUuid: signAtlasTexture?.uuid || signAtlasState.textureUuid || null,
+          exteriorSignCount: runtime.exteriorAtlasSignCount,
+          appliedSignCount: runtime.exteriorAtlasSignCount,
+          sharedTexture: Boolean(signAtlasTexture),
         },
         clouds: {
           count: runtime.cloudGroups.length,
@@ -2642,6 +3006,11 @@
         return unregister;
       },
       refreshColliders: () => refreshColliderRegistry(performance.now(), true),
+      setOfficeFloor,
+      handleInteraction(action) {
+        if (action !== "office-elevator" || runtime.activeBuilding?.id !== "office") return false;
+        return Boolean(window.__voxcelOffice?.openElevator?.());
+      },
       acceptNextMove: () => {
         runtime.acceptNextMove = true;
       },

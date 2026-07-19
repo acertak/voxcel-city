@@ -12,6 +12,8 @@ await mkdir(output, { recursive: true });
 for (const name of [
   "index.html",
   "texture-atlas-system.js",
+  "city-world-system.js",
+  "city-map-system.js",
   "modular-character-system.js",
   "world-enhancements.js",
   "assets",
