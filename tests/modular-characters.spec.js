@@ -51,9 +51,11 @@ test.describe("modular characters", () => {
     expect(state.error).toBeNull();
     expect(state.hookRegistered).toBe(true);
     expect(state.catalog).toEqual({
-      schema: 1,
+      schema: 2,
       geometryCount: 44,
       triangleCount: 4444,
+      texturedGeometryCount: 44,
+      atlas: "voxcel-detail-atlas-v1",
       variantCounts: {
         top_detail: 10,
         face: 3,
@@ -106,9 +108,10 @@ test.describe("modular characters", () => {
     const characterRequests = await page.evaluate(() => (
       performance.getEntriesByType("resource")
         .map((entry) => entry.name)
-        .filter((name) => /modular-character|model-walk-run|esm\.sh/.test(name))
+        .filter((name) => /modular-character|voxcel-detail-atlas|model-walk-run|esm\.sh/.test(name))
     ));
     expect(characterRequests.filter((name) => name.includes("modular-character-parts.glb"))).toHaveLength(1);
+    expect(characterRequests.filter((name) => name.includes("voxcel-detail-atlas.jpg"))).toHaveLength(1);
     expect(characterRequests.some((name) => name.includes("model-walk-run.glb"))).toBe(false);
     expect(characterRequests.some((name) => name.includes("esm.sh"))).toBe(false);
 
@@ -128,6 +131,90 @@ test.describe("modular characters", () => {
       attachedToPlayer: true,
       characterRootCount: 1,
     });
+
+    const atlasPipeline = await page.evaluate(() => {
+      const playerMeshes = [];
+      window.__voxcelCharacters.playerRoot.traverse((object) => {
+        if (object.isMesh) playerMeshes.push(object);
+      });
+      const crowdMeshes = [...window.__voxcelCharacters.crowdRoot.children];
+      const geometries = new Map();
+      for (const mesh of [...playerMeshes, ...crowdMeshes]) {
+        geometries.set(mesh.geometry.uuid, mesh.geometry);
+      }
+
+      let validUvGeometryCount = 0;
+      let uvBoundsValid = true;
+      let atlasTilesValid = true;
+      const atlasIds = new Set();
+      for (const geometry of geometries.values()) {
+        const position = geometry.getAttribute("position");
+        const uv = geometry.getAttribute("uv");
+        if (uv?.itemSize === 2 && uv.count === position?.count) validUvGeometryCount += 1;
+        if (!uv) {
+          uvBoundsValid = false;
+        } else {
+          for (const coordinate of uv.array) {
+            if (!Number.isFinite(coordinate) || coordinate < 0 || coordinate > 1) {
+              uvBoundsValid = false;
+              break;
+            }
+          }
+        }
+        atlasIds.add(geometry.userData.voxcelAtlas);
+        if (!Number.isInteger(geometry.userData.voxcelAtlasTile)) atlasTilesValid = false;
+      }
+
+      const atlasState = window.__voxcelTextureAtlas.getState();
+      const playerMaterials = new Set(playerMeshes.map((mesh) => mesh.material));
+      const crowdMaterials = new Set(crowdMeshes.map((mesh) => mesh.material));
+      const playerTextures = new Set([...playerMaterials].map((material) => material.map));
+      const crowdTextures = new Set([...crowdMaterials].map((material) => material.map));
+      const atlasTexture = [...crowdTextures][0];
+
+      return {
+        atlasState,
+        geometryCount: geometries.size,
+        validUvGeometryCount,
+        uvBoundsValid,
+        atlasIds: [...atlasIds],
+        atlasTilesValid,
+        playerMaterialCount: playerMaterials.size,
+        crowdMaterialCount: crowdMaterials.size,
+        playerTextureCount: playerTextures.size,
+        crowdTextureCount: crowdTextures.size,
+        allMaterialsShareAtlas: (
+          atlasTexture &&
+          [...playerTextures, ...crowdTextures].every((texture) => texture === atlasTexture)
+        ),
+        atlasTextureName: atlasTexture?.name,
+        atlasTextureTagged: atlasTexture?.userData.voxcelTextureAtlas,
+      };
+    });
+    expect(atlasPipeline).toMatchObject({
+      atlasState: {
+        ready: true,
+        loading: false,
+        error: null,
+        width: 512,
+        height: 512,
+        tileCount: 64,
+        textureUuid: expect.any(String),
+      },
+      geometryCount: 44,
+      validUvGeometryCount: 44,
+      uvBoundsValid: true,
+      atlasIds: ["voxcel-detail-atlas-v1"],
+      atlasTilesValid: true,
+      playerMaterialCount: 7,
+      crowdMaterialCount: 1,
+      playerTextureCount: 1,
+      crowdTextureCount: 1,
+      allMaterialsShareAtlas: true,
+      atlasTextureName: "VoxcelDetailAtlas",
+      atlasTextureTagged: true,
+    });
+    expect(atlasPipeline.atlasState.textureUuid).toBe(state.resources.sharedAtlasTexture);
   });
 
   test("renders eighteen varied NPCs through shared InstancedMesh buckets", async ({ page }) => {
@@ -169,7 +256,8 @@ test.describe("modular characters", () => {
       npcGeometries: 44,
       sharedGeometryCount: 44,
       npcMaterials: 1,
-      npcTextures: 0,
+      npcTextures: 1,
+      sharedAtlasTexture: expect.any(String),
       npcMeshSlots: 342,
       drawCallUpperBound: 44,
     });
@@ -186,6 +274,7 @@ test.describe("modular characters", () => {
         instanceCount: meshes.reduce((count, mesh) => count + mesh.count, 0),
         geometryCount: new Set(meshes.map((mesh) => mesh.geometry.uuid)).size,
         materialCount: new Set(meshes.map((mesh) => mesh.material.uuid)).size,
+        textureCount: new Set(meshes.map((mesh) => mesh.material.map?.uuid).filter(Boolean)).size,
       };
     });
     expect(crowd).toEqual({
@@ -197,6 +286,7 @@ test.describe("modular characters", () => {
       instanceCount: 342,
       geometryCount: 44,
       materialCount: 1,
+      textureCount: 1,
     });
   });
 

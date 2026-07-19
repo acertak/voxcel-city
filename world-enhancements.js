@@ -7,6 +7,56 @@
   const SWEEP_STEP = 0.12;
   const COLLIDER_REFRESH_MS = 750;
 
+  const exteriorSignTiles = {
+    conv: "sign_convenience",
+    cafe: "sign_cafe",
+    bake: "sign_bakery",
+    rest: "sign_restaurant",
+    cloth: "sign_clothing",
+    salon: "sign_salon",
+    furn: "sign_furniture",
+    book: "sign_book",
+    hosp: "sign_hospital",
+    bank: "sign_bank",
+    home: "sign_home",
+    police: "sign_police",
+  };
+
+  const garmentAtlasTiles = [
+    "fabric_pinstripe",
+    "fabric_gingham",
+    "fabric_herringbone",
+    "fabric_dots",
+    "fabric_floral",
+    "fabric_varsity",
+    "fabric_rib",
+    "fabric_plaid",
+    "fabric_quilt",
+    "fabric_stars",
+  ];
+
+  const bookAtlasTiles = [
+    "book_flower",
+    "book_cloud",
+    "book_tree",
+    "book_moon",
+    "book_diamond",
+    "book_sailboat",
+    "book_sun",
+    "book_stars",
+  ];
+
+  const hairAtlasTiles = [
+    "hair_straight",
+    "hair_wavy",
+    "hair_curly",
+    "hair_braid",
+    "hair_spiky",
+    "hair_layered",
+    "hair_cropped",
+    "hair_highlight",
+  ];
+
   const palettes = {
     food: { background: 0x17130f, wall: 0xe8d6bd, accent: 0x9e5f3f, floor: 0x6f4934 },
     cloth: { background: 0x11141b, wall: 0xe5e8ef, accent: 0x9b5177, floor: 0x494d59 },
@@ -78,7 +128,25 @@
     adaptedNativeObjects: [],
     policeJailCellSnapshot: null,
     beforeRenderCallbacks: new Set(),
+    atlasStatus: "idle",
+    atlasError: null,
+    exteriorAtlasSignCount: 0,
+    interiorAtlasVisualCount: 0,
+    bookStripCount: 0,
+    productStripCount: 0,
+    garmentTextureCount: 0,
   };
+
+  function findPrototypeConstructor(object, methodName) {
+    let prototype = Object.getPrototypeOf(object);
+    while (prototype) {
+      if (Object.prototype.hasOwnProperty.call(prototype, methodName)) {
+        return prototype.constructor;
+      }
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    return null;
+  }
 
   function installUi() {
     const style = document.createElement("style");
@@ -148,7 +216,13 @@
       const handle = window.__voxcelPlayer;
       if (handle?.scene && handle?.playerRoot) {
         window.clearInterval(timer);
-        initialize(handle);
+        Promise.resolve(initialize(handle)).catch((error) => {
+          console.error("World enhancements failed to initialize.", error);
+          window.__voxcelEnhancements = {
+            ready: false,
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        });
         return;
       }
       if (performance.now() - startedAt > 15000) {
@@ -158,7 +232,7 @@
     }, 20);
   }
 
-  function initialize(handle) {
+  async function initialize(handle) {
     const cityScene = handle.scene;
     const playerRoot = handle.playerRoot;
     const playerShadow = handle.playerShadow;
@@ -214,12 +288,40 @@
       Material: standardMaterial?.constructor,
       CloudMaterial: basicMaterial?.constructor || standardMaterial?.constructor,
       CanvasTexture: canvasTexture?.constructor,
+      Texture: canvasTexture ? findPrototypeConstructor(canvasTexture, "transformUv") : null,
       PointLight: pointLight?.constructor,
+    };
+
+    let atlasTexture = null;
+    let interiorAtlasMaterialCache = {
+      neutral: new WeakMap(),
+      tinted: new WeakMap(),
     };
 
     if (!constructors.Mesh || !constructors.BoxGeometry || !constructors.Material) {
       console.error("World enhancements could not resolve Three.js constructors.");
       return;
+    }
+
+    const atlasApi = window.__voxcelTextureAtlas;
+    if (atlasApi?.getTexture && constructors.Texture) {
+      runtime.atlasStatus = "loading";
+      try {
+        atlasTexture = await atlasApi.getTexture({
+          TextureConstructor: constructors.Texture,
+          referenceTexture: canvasTexture,
+          renderer,
+        });
+        runtime.atlasStatus = "ready";
+        runtime.atlasError = null;
+      } catch (error) {
+        runtime.atlasStatus = "fallback";
+        runtime.atlasError = error instanceof Error ? error.message : String(error);
+        console.warn("Voxcel detail atlas could not be loaded; using solid-color fallbacks.", error);
+      }
+    } else {
+      runtime.atlasStatus = "fallback";
+      runtime.atlasError = "texture-atlas-runtime-unavailable";
     }
 
     function isPlayerObject(object) {
@@ -517,6 +619,137 @@
       if (Math.floor(now / 1000) !== Math.floor(previous / 1000)) updateCloudAppearance();
     }
 
+    function oddSegmentCount(value) {
+      let count = Math.max(1, Math.round(value));
+      if (count % 2 === 0) count += 1;
+      return count;
+    }
+
+    function attributeComponent(attribute, index, axis) {
+      if (axis === 0) return attribute.getX(index);
+      if (axis === 1) return attribute.getY(index);
+      return attribute.getZ(index);
+    }
+
+    function applyAtlasUv(geometry, tile, options = {}) {
+      const uv = geometry.getAttribute?.("uv");
+      if (!atlasTexture || !atlasApi?.getUvRect || !uv) return false;
+      const rect = atlasApi.getUvRect(tile, options.inset ?? 3);
+      const position = geometry.getAttribute("position");
+      const normal = geometry.getAttribute("normal");
+      const size = options.size || [1, 1, 1];
+      const thinAxis = size[0] <= size[2] ? 0 : 2;
+      const horizontalAxis = thinAxis === 0 ? 2 : 0;
+      const horizontalSize = size[horizontalAxis];
+      const verticalSize = size[1];
+      const segmentCount = options.contain
+        ? oddSegmentCount(horizontalSize / Math.max(0.001, verticalSize))
+        : 1;
+      const iconWidth = horizontalSize / segmentCount;
+
+      for (let index = 0; index < uv.count; index += 1) {
+        let localU = uv.getX(index);
+        let localV = uv.getY(index);
+        if (options.contain && position && normal) {
+          const facing = Math.abs(attributeComponent(normal, index, thinAxis)) > 0.8;
+          if (facing) {
+            const horizontal = attributeComponent(position, index, horizontalAxis);
+            localU = Math.max(0, Math.min(1, horizontal / iconWidth + 0.5));
+            localV = Math.max(
+              0,
+              Math.min(1, position.getY(index) / Math.max(0.001, verticalSize) + 0.5),
+            );
+          } else {
+            localU = attributeComponent(normal, index, horizontalAxis) < 0 ? 0 : 1;
+            localV = 0.5;
+          }
+        }
+        uv.setXY(
+          index,
+          rect.u0 + localU * (rect.u1 - rect.u0),
+          rect.v1 - localV * (rect.v1 - rect.v0),
+        );
+      }
+      uv.needsUpdate = true;
+      geometry.userData.voxcelAtlasTile = tile;
+      geometry.userData.voxcelAtlasRect = rect;
+      return true;
+    }
+
+    function createAtlasBoxGeometry(size, tile, options = {}) {
+      const contain = Boolean(options.contain);
+      const thinAxis = size[0] <= size[2] ? 0 : 2;
+      const horizontalSize = size[thinAxis === 0 ? 2 : 0];
+      const segmentCount = contain
+        ? oddSegmentCount(horizontalSize / Math.max(0.001, size[1]))
+        : 1;
+      const geometry = new constructors.BoxGeometry(
+        size[0],
+        size[1],
+        size[2],
+        contain && thinAxis === 2 ? segmentCount : 1,
+        1,
+        contain && thinAxis === 0 ? segmentCount : 1,
+      );
+      applyAtlasUv(geometry, tile, { ...options, size });
+      return geometry;
+    }
+
+    function atlasMaterialFor(material, preserveTint = false) {
+      if (!atlasTexture) return material;
+      const cache = preserveTint
+        ? interiorAtlasMaterialCache.tinted
+        : interiorAtlasMaterialCache.neutral;
+      const cached = cache.get(material);
+      if (cached) return cached;
+      const atlasMaterial = material.clone();
+      atlasMaterial.name = `${material.name || material.type}:VoxcelAtlas${preserveTint ? ":Tinted" : ""}`;
+      atlasMaterial.map = atlasTexture;
+      if (!preserveTint) atlasMaterial.color?.setHex(0xffffff);
+      atlasMaterial.userData = {
+        ...material.userData,
+        voxcelInteriorMaterial: true,
+        voxcelAtlasMaterial: true,
+        voxcelAtlasTinted: preserveTint,
+      };
+      atlasMaterial.needsUpdate = true;
+      runtime.interiorMaterials.add(atlasMaterial);
+      cache.set(material, atlasMaterial);
+      return atlasMaterial;
+    }
+
+    function enhanceExteriorSigns() {
+      if (!atlasTexture) return;
+      runtime.exteriorAtlasSignCount = 0;
+      for (const building of buildings) {
+        const sign = handle.buildingViews?.[building.id]?.sign;
+        const tile = exteriorSignTiles[building.id];
+        const parameters = sign?.geometry?.parameters;
+        if (!sign?.isMesh || !tile || !parameters) continue;
+        if (sign.material?.map === atlasTexture && sign.userData.voxcelAtlasTile === tile) {
+          runtime.exteriorAtlasSignCount += 1;
+          continue;
+        }
+        const previousGeometry = sign.geometry;
+        const previousTexture = sign.material?.map;
+        sign.geometry = createAtlasBoxGeometry(
+          [parameters.width, parameters.height, parameters.depth],
+          tile,
+          { contain: true },
+        );
+        previousGeometry.dispose();
+        if (previousTexture && previousTexture !== atlasTexture) previousTexture.dispose();
+        sign.material.map = atlasTexture;
+        sign.material.color?.setHex(0xffffff);
+        sign.material.roughness = 0.72;
+        sign.material.needsUpdate = true;
+        sign.name = `ExteriorSign:${building.id}`;
+        sign.userData.voxcelAtlasTile = tile;
+        sign.userData.voxcelAtlasTexture = atlasTexture.uuid;
+        runtime.exteriorAtlasSignCount += 1;
+      }
+    }
+
     function makeMaterial(color, options = {}) {
       const parameters = {
         color,
@@ -525,6 +758,7 @@
         transparent: options.transparent ?? false,
         opacity: options.opacity ?? 1,
       };
+      if (options.map) parameters.map = options.map;
       if (options.emissive !== undefined) parameters.emissive = options.emissive;
       if (options.emissiveIntensity !== undefined) {
         parameters.emissiveIntensity = options.emissiveIntensity;
@@ -551,9 +785,13 @@
     }
 
     function makeFixtureBox(group, building, name, size, offset, material, role, options = {}) {
+      const usesAtlas = Boolean(options.atlasTile && atlasTexture);
+      const geometry = usesAtlas
+        ? createAtlasBoxGeometry(size, options.atlasTile, { contain: options.atlasContain })
+        : new constructors.BoxGeometry(size[0], size[1], size[2]);
       const mesh = new constructors.Mesh(
-        new constructors.BoxGeometry(size[0], size[1], size[2]),
-        material,
+        geometry,
+        usesAtlas ? atlasMaterialFor(material, Boolean(options.atlasTint)) : material,
       );
       mesh.name = name;
       mesh.position.set(building.x + offset[0], offset[1], building.z + offset[2]);
@@ -563,6 +801,11 @@
       mesh.userData.voxcelInteriorFixture = true;
       mesh.userData.voxcelFixtureRole = role;
       if (options.solid === false) mesh.userData.collisionMode = "none";
+      if (usesAtlas) {
+        mesh.userData.voxcelAtlasTile = options.atlasTile;
+        mesh.userData.voxcelAtlasTexture = atlasTexture.uuid;
+        runtime.interiorAtlasVisualCount += 1;
+      }
       group.add(mesh);
       runtime.themeFixtureCount += 1;
       runtime.fixtureRoles.add(role);
@@ -709,18 +952,33 @@
           role,
           { rotationY },
         );
-        for (let item = 0; item < Math.max(3, Math.floor(width / 0.55)); item += 1) {
-          const itemX = x - width / 2 + 0.35 + item * ((width - 0.7) / Math.max(1, Math.floor(width / 0.55) - 1));
+        if (atlasTexture) {
           makeFixtureBox(
             shelf,
             building,
-            `${name}:product:${row}:${item}`,
-            [0.28, 0.42, Math.max(0.18, depth - 0.24)],
-            [itemX, y + 0.27, z - 0.02],
+            `${name}:product-strip:${row}`,
+            [Math.max(0.5, width - 0.42), 0.46, 0.08],
+            [x, y + 0.28, z - depth / 2 + 0.04],
             productMaterial,
             `${role}-product`,
-            { rotationY, solid: false },
+            { rotationY, solid: false, atlasTile: "products_row" },
           );
+          runtime.productStripCount += 1;
+        } else {
+          const itemCount = Math.max(3, Math.floor(width / 0.55));
+          for (let item = 0; item < itemCount; item += 1) {
+            const itemX = x - width / 2 + 0.35 + item * ((width - 0.7) / Math.max(1, itemCount - 1));
+            makeFixtureBox(
+              shelf,
+              building,
+              `${name}:product:${row}:${item}`,
+              [0.28, 0.42, Math.max(0.18, depth - 0.24)],
+              [itemX, y + 0.27, z - 0.02],
+              productMaterial,
+              `${role}-product`,
+              { rotationY, solid: false },
+            );
+          }
         }
       }
       return shelf;
@@ -769,7 +1027,6 @@
       }
 
       const faces = doubleSided ? [-1, 1] : [-1];
-      const columns = Math.max(5, Math.floor(length / 0.46));
       for (let row = 0; row < rows; row += 1) {
         const shelfY = 0.12 + row * ((height - 0.22) / Math.max(1, rows - 1));
         makeFixtureBox(
@@ -783,24 +1040,44 @@
         );
         if (row === rows - 1) continue;
         for (const face of faces) {
-          for (let column = 0; column < columns; column += 1) {
-            const main = -length / 2 + 0.24 + column * ((length - 0.48) / Math.max(1, columns - 1));
-            const bookHeight = 0.46 + ((row + column) % 3) * 0.08;
+          if (atlasTexture) {
             const cross = face * (depth / 2 + 0.015);
             makeFixtureBox(
               bookcase,
               building,
-              `${name}:book:${row}:${face}:${column}`,
-              alongX ? [0.22, bookHeight, 0.15] : [0.15, bookHeight, 0.22],
+              `${name}:book-strip:${row}:${face}`,
+              alongX ? [length - 0.34, 0.62, 0.08] : [0.08, 0.62, length - 0.34],
               [
-                x + (alongX ? main : cross),
-                shelfY + bookHeight / 2 + 0.08,
-                z + (alongX ? cross : main),
+                x + (alongX ? 0 : cross),
+                shelfY + 0.39,
+                z + (alongX ? cross : 0),
               ],
-              materials.bookSpines[(row * 3 + column) % materials.bookSpines.length],
+              materials.bookSpines[row % materials.bookSpines.length],
               "book-spines",
-              { solid: false },
+              { solid: false, atlasTile: "books_row" },
             );
+            runtime.bookStripCount += 1;
+          } else {
+            const columns = Math.max(5, Math.floor(length / 0.46));
+            for (let column = 0; column < columns; column += 1) {
+              const main = -length / 2 + 0.24 + column * ((length - 0.48) / Math.max(1, columns - 1));
+              const bookHeight = 0.46 + ((row + column) % 3) * 0.08;
+              const cross = face * (depth / 2 + 0.015);
+              makeFixtureBox(
+                bookcase,
+                building,
+                `${name}:book:${row}:${face}:${column}`,
+                alongX ? [0.22, bookHeight, 0.15] : [0.15, bookHeight, 0.22],
+                [
+                  x + (alongX ? main : cross),
+                  shelfY + bookHeight / 2 + 0.08,
+                  z + (alongX ? cross : main),
+                ],
+                materials.bookSpines[(row * 3 + column) % materials.bookSpines.length],
+                "book-spines",
+                { solid: false },
+              );
+            }
           }
         }
       }
@@ -927,7 +1204,7 @@
           [1.72 + (index % 4) * 0.52, 0.98 + Math.floor(index / 4) * 0.14, -3.78 + Math.floor(index / 4) * 0.48],
           materials.bookSpines[index % materials.bookSpines.length],
           "new-releases",
-          { solid: false },
+          { solid: false, atlasTile: bookAtlasTiles[index % bookAtlasTiles.length] },
         );
       }
 
@@ -957,7 +1234,7 @@
         [0, 5.15, 10.02],
         materials.green,
         "genre-signage",
-        { solid: false },
+        { solid: false, atlasTile: "sign_book", atlasContain: true },
       );
       addPendantLights(group, building, profile, materials, [[-3.5, 1], [3.5, 1], [0, -4.4]]);
     }
@@ -995,17 +1272,31 @@
           role,
         );
         for (const side of [-1, 1]) {
-          for (let item = 0; item < 7; item += 1) {
+          if (atlasTexture) {
             makeFixtureBox(
               gondola,
               building,
-              `${name}:item:${row}:${side}:${item}`,
-              [0.34, 0.38, 0.4],
-              [x + side * 0.38, y + 0.25, z - length / 2 + 0.48 + item * ((length - 0.96) / 6)],
-              productMaterials[(row + item + (side > 0 ? 1 : 0)) % productMaterials.length],
+              `${name}:product-strip:${row}:${side}`,
+              [0.08, 0.48, length - 0.48],
+              [x + side * (width / 2 - 0.06), y + 0.28, z],
+              productMaterials[(row + (side > 0 ? 1 : 0)) % productMaterials.length],
               `${role}-product`,
-              { solid: false },
+              { solid: false, atlasTile: "products_row" },
             );
+            runtime.productStripCount += 1;
+          } else {
+            for (let item = 0; item < 7; item += 1) {
+              makeFixtureBox(
+                gondola,
+                building,
+                `${name}:item:${row}:${side}:${item}`,
+                [0.34, 0.38, 0.4],
+                [x + side * 0.38, y + 0.25, z - length / 2 + 0.48 + item * ((length - 0.96) / 6)],
+                productMaterials[(row + item + (side > 0 ? 1 : 0)) % productMaterials.length],
+                `${role}-product`,
+                { solid: false },
+              );
+            }
           }
         }
       }
@@ -1038,17 +1329,35 @@
           "refrigerated-wall",
           { solid: false },
         );
+      }
+      if (atlasTexture) {
         for (let row = 0; row < 3; row += 1) {
           makeFixtureBox(
             group,
             building,
-            `RefrigeratorWall:drink:${door}:${row}`,
-            [1.25, 0.24, 0.18],
-            [-5.55 + door * 1.85, 0.62 + row * 0.68, 7.55],
-            materials.bookSpines[(door + row) % materials.bookSpines.length],
+            `RefrigeratorWall:product-strip:${row}`,
+            [12.55, 0.3, 0.08],
+            [0, 0.62 + row * 0.68, 7.55],
+            materials.white,
             "cold-products",
-            { solid: false },
+            { solid: false, atlasTile: "products_row" },
           );
+          runtime.productStripCount += 1;
+        }
+      } else {
+        for (let door = 0; door < 7; door += 1) {
+          for (let row = 0; row < 3; row += 1) {
+            makeFixtureBox(
+              group,
+              building,
+              `RefrigeratorWall:drink:${door}:${row}`,
+              [1.25, 0.24, 0.18],
+              [-5.55 + door * 1.85, 0.62 + row * 0.68, 7.55],
+              materials.bookSpines[(door + row) % materials.bookSpines.length],
+              "cold-products",
+              { solid: false },
+            );
+          }
         }
       }
       addGondola(group, building, { name: "Gondola:left", x: -3.1, z: 0.8, role: "store-aisle" }, materials);
@@ -1076,7 +1385,11 @@
         material: materials.green,
       }, materials);
       makeFixtureBox(group, building, "CafeBar:espresso", [1.5, 0.78, 0.72], [-2.1, 1.53, 8.18], materials.metal, "coffee-bar", { solid: false });
-      makeFixtureBox(group, building, "CafeBar:menu", [5.3, 1.25, 0.08], [0.2, 4.1, 9.35], materials.darkWood, "menu-board", { solid: false });
+      makeFixtureBox(group, building, "CafeBar:menu", [5.3, 1.25, 0.08], [0.2, 4.1, 9.35], materials.darkWood, "menu-board", {
+        solid: false,
+        atlasTile: "sign_menu",
+        atlasContain: true,
+      });
       makeFixtureBox(group, building, "CakeCase:base", [3.3, 1.02, 1.3], [5.8, 0.51, 5.5], materials.cream, "cake-display");
       makeFixtureBox(group, building, "CakeCase:glass", [3.15, 0.82, 1.12], [5.8, 1.35, 5.5], materials.glass, "cake-display", { solid: false });
       for (let cake = 0; cake < 5; cake += 1) {
@@ -1121,13 +1434,22 @@
           );
         }
       }
-      makeFixtureBox(group, building, "Bakery:wall-sign", [7.2, 0.82, 0.08], [2.6, 4.35, 8.48], materials.red, "bakery-signage", { solid: false });
+      makeFixtureBox(group, building, "Bakery:wall-sign", [7.2, 0.82, 0.08], [2.6, 4.35, 8.48], materials.red, "bakery-signage", {
+        solid: false,
+        atlasTile: "sign_bakery",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[-3.8, 0.4], [0, 0.4], [3.8, 0.4]]);
     }
 
     function buildRestaurant(group, building, profile, materials) {
       makeFixtureBox(group, building, "KitchenPass:wall", [12.5, 2.6, 0.85], [0, 1.3, 9.1], materials.darkWood, "kitchen-pass");
       makeFixtureBox(group, building, "KitchenPass:opening", [8.4, 1.35, 0.18], [0, 2.3, 8.6], materials.black, "kitchen-pass", { solid: false });
+      makeFixtureBox(group, building, "Restaurant:menu-sign", [5.8, 1.0, 0.08], [0, 4.45, 8.62], materials.red, "restaurant-signage", {
+        solid: false,
+        atlasTile: "sign_menu",
+        atlasContain: true,
+      });
       addCounter(group, building, { name: "HostStand", x: 0, z: -7.7, width: 2.2, role: "host-stand", material: materials.red }, materials);
       addRug(group, building, "Restaurant:rug", [17.5, 12], [0, 0.5], materials.red, "dining-room");
       for (const [index, x, z] of [
@@ -1148,6 +1470,7 @@
       makeFixtureBox(group, building, `${name}:right-post`, [0.12, 1.75, 0.12], [offset[0] + length / 2, 0.88, offset[1]], materials.metal, role);
       const garmentCount = Math.max(5, Math.floor(length / 0.48));
       for (let index = 0; index < garmentCount; index += 1) {
+        const atlasTile = garmentAtlasTiles[index % garmentAtlasTiles.length];
         makeFixtureBox(
           group,
           building,
@@ -1156,8 +1479,9 @@
           [offset[0] - length / 2 + 0.3 + index * ((length - 0.6) / Math.max(1, garmentCount - 1)), 1.16, offset[1]],
           [materials.rose, materials.blue, materials.mustard, materials.green][index % 4],
           "garment-display",
-          { solid: false },
+          { solid: false, atlasTile, atlasTint: true },
         );
+        if (atlasTexture) runtime.garmentTextureCount += 1;
       }
     }
 
@@ -1170,7 +1494,12 @@
       for (const [index, x] of [-2.8, 0, 2.8].entries()) {
         makeFixtureBox(group, building, `Mannequin:${index}:plinth`, [1.25, 0.22, 1.25], [x, 0.14, 5.3], materials.white, "mannequin-display");
         makeFixtureBox(group, building, `Mannequin:${index}:legs`, [0.42, 1.25, 0.42], [x, 0.86, 5.3], materials.black, "mannequin-display", { solid: false });
-        makeFixtureBox(group, building, `Mannequin:${index}:torso`, [0.92, 1.35, 0.52], [x, 2.14, 5.3], [materials.rose, materials.blue, materials.green][index], "mannequin-display", { solid: false });
+        makeFixtureBox(group, building, `Mannequin:${index}:torso`, [0.92, 1.35, 0.52], [x, 2.14, 5.3], [materials.rose, materials.blue, materials.green][index], "mannequin-display", {
+          solid: false,
+          atlasTile: garmentAtlasTiles[(index + 4) % garmentAtlasTiles.length],
+          atlasTint: true,
+        });
+        if (atlasTexture) runtime.garmentTextureCount += 1;
       }
       for (let stall = 0; stall < 3; stall += 1) {
         const x = -6 + stall * 6;
@@ -1178,7 +1507,11 @@
         makeFixtureBox(group, building, `FittingRoom:${stall}:curtain`, [3.5, 2.45, 0.12], [x, 1.3, 7.8], materials.lavender, "fitting-room", { solid: false });
       }
       addCounter(group, building, { name: "FashionCheckout", x: 7.2, z: -7.1, width: 4.4, role: "checkout", material: materials.rose }, materials);
-      makeFixtureBox(group, building, "Fashion:brand-wall", [8.8, 1.1, 0.08], [0, 4.75, 9.78], materials.black, "brand-signage", { solid: false });
+      makeFixtureBox(group, building, "Fashion:brand-wall", [8.8, 1.1, 0.08], [0, 4.75, 9.78], materials.black, "brand-signage", {
+        solid: false,
+        atlasTile: "sign_clothing",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[0, -5], [0, 0], [0, 5]]);
     }
 
@@ -1188,6 +1521,10 @@
         makeFixtureBox(group, building, `StylingStation:${station}:mirror`, [0.12, 2.15, 2.15], [8.3, 2.25, z], materials.glass, "styling-station", { solid: false });
         addSeat(group, building, `StylingStation:${station}:chair`, [5.9, z], station % 2 ? materials.lavender : materials.rose, "salon-chair", Math.PI / 2);
         makeFixtureBox(group, building, `StylingStation:${station}:console`, [1.05, 0.82, 1.75], [7.65, 0.52, z], materials.darkWood, "styling-station");
+        makeFixtureBox(group, building, `StylingStation:${station}:style-card`, [0.08, 1.05, 1.05], [8.42, 4.25, z], materials.white, "salon-style-guide", {
+          solid: false,
+          atlasTile: hairAtlasTiles[station % hairAtlasTiles.length],
+        });
       }
       for (const [index, x] of [-3.4, 0.4].entries()) {
         makeFixtureBox(group, building, `WashBay:${index}:base`, [2.6, 0.82, 1.35], [x, 0.48, 7.45], materials.black, "wash-bay");
@@ -1197,7 +1534,11 @@
       makeFixtureBox(group, building, "SalonWaiting:sofa-base", [4.6, 0.52, 1.25], [-4.7, 0.38, -6.1], materials.lavender, "waiting-sofa");
       makeFixtureBox(group, building, "SalonWaiting:sofa-back", [4.6, 1.1, 0.26], [-4.7, 0.98, -6.58], materials.lavender, "waiting-sofa");
       addCounter(group, building, { name: "SalonReception", x: 4.8, z: -7.0, width: 4.1, role: "reception", material: materials.rose }, materials);
-      makeFixtureBox(group, building, "Salon:logo-wall", [6.4, 0.88, 0.08], [-3.8, 4.45, 9.28], materials.rose, "salon-signage", { solid: false });
+      makeFixtureBox(group, building, "Salon:logo-wall", [6.4, 0.88, 0.08], [-3.8, 4.45, 9.28], materials.rose, "salon-signage", {
+        solid: false,
+        atlasTile: "sign_salon",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[0, -2], [0, 3.5], [5.9, 0]]);
     }
 
@@ -1229,12 +1570,20 @@
         makeFixtureBox(group, building, `BedroomZone:lamp:${side}`, [0.55, 1.25, 0.55], [side * 3.55, 1.47, 7.6], materials.mustard, "showroom-lighting", { solid: false });
       }
       addCounter(group, building, { name: "ShowroomDesk", x: 7.6, z: 7.6, width: 4.6, role: "design-desk", material: materials.green }, materials);
+      makeFixtureBox(group, building, "Furniture:brand-wall", [7.4, 1.0, 0.08], [0, 4.75, 10.47], materials.green, "furniture-signage", {
+        solid: false,
+        atlasTile: "sign_furniture",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[-5.7, -4], [5.7, -4], [0, 5.5]]);
     }
 
     function buildHospital(group, building, profile, materials) {
       addCounter(group, building, { name: "HospitalReception", x: 5.6, z: -7.7, width: 7.2, depth: 1.45, role: "reception", material: materials.teal }, materials);
-      makeFixtureBox(group, building, "HospitalReception:cross", [1.1, 1.1, 0.1], [5.6, 2.2, -8.45], materials.red, "hospital-signage", { solid: false });
+      makeFixtureBox(group, building, "HospitalReception:cross", [1.1, 1.1, 0.1], [5.6, 2.2, -8.45], materials.red, "hospital-signage", {
+        solid: false,
+        atlasTile: "sign_hospital",
+      });
       addRug(group, building, "WaitingArea:rug", [8.8, 7.5], [-6, -5.1], materials.blue, "waiting-area");
       for (let row = 0; row < 2; row += 1) {
         for (let seat = 0; seat < 3; seat += 1) {
@@ -1249,7 +1598,11 @@
         makeFixtureBox(group, building, `ExamBay:${bay}:screen-right`, [0.12, 2.65, 6.2], [x + 2.65, 1.4, 5.2], materials.glass, "privacy-screen", { solid: false });
       }
       addDisplayShelf(group, building, { name: "MedicineCabinet", x: 7.8, z: 9.1, width: 6.2, depth: 0.7, height: 2.9, role: "medicine-cabinet", productMaterial: materials.blue }, materials);
-      makeFixtureBox(group, building, "Hospital:wayfinding", [10.5, 0.9, 0.08], [0, 4.8, 10.47], materials.teal, "hospital-signage", { solid: false });
+      makeFixtureBox(group, building, "Hospital:wayfinding", [10.5, 0.9, 0.08], [0, 4.8, 10.47], materials.teal, "hospital-signage", {
+        solid: false,
+        atlasTile: "sign_hospital",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[-6.8, 5], [0, 5], [6.8, 5], [0, -5]]);
     }
 
@@ -1258,12 +1611,19 @@
       for (let teller = 0; teller < 3; teller += 1) {
         const x = -5.4 + teller * 4.4;
         makeFixtureBox(group, building, `Teller:${teller}:glass`, [3.4, 1.65, 0.1], [x, 2.05, 7.35], materials.glass, "teller-window", { solid: false });
-        makeFixtureBox(group, building, `Teller:${teller}:marker`, [0.72, 0.72, 0.08], [x, 3.45, 7.32], materials.mustard, "teller-signage", { solid: false });
+        makeFixtureBox(group, building, `Teller:${teller}:marker`, [0.72, 0.72, 0.08], [x, 3.45, 7.32], materials.mustard, "teller-signage", {
+          solid: false,
+          atlasTile: "sign_bank",
+        });
       }
       for (let atm = 0; atm < 4; atm += 1) {
         const z = 5.6 - atm * 3.1;
         makeFixtureBox(group, building, `ATM:${atm}:body`, [1.05, 2.25, 1.8], [-9.1, 1.13, z], materials.metal, "atm");
-        makeFixtureBox(group, building, `ATM:${atm}:screen`, [0.08, 0.68, 0.78], [-8.55, 1.48, z], materials.blue, "atm", { solid: false });
+        makeFixtureBox(group, building, `ATM:${atm}:screen`, [0.08, 0.68, 0.78], [-8.55, 1.48, z], materials.blue, "atm", {
+          solid: false,
+          atlasTile: "sign_atm",
+          atlasContain: true,
+        });
       }
       addRug(group, building, "BankQueue:rug", [12.5, 8.5], [1.2, -1.4], materials.blue, "queue-area");
       for (let post = 0; post < 8; post += 1) {
@@ -1274,7 +1634,11 @@
       makeFixtureBox(group, building, "VaultDoor:frame", [4.6, 4.6, 0.48], [8.45, 2.3, 5.3], materials.metal, "vault");
       makeFixtureBox(group, building, "VaultDoor:center", [3.6, 3.6, 0.54], [8.18, 2.3, 5.3], materials.black, "vault", { solid: false });
       addCounter(group, building, { name: "BankHelpDesk", x: 6.2, z: -6.5, width: 4.2, role: "help-desk", material: materials.blue }, materials);
-      makeFixtureBox(group, building, "Bank:crest", [7.4, 1.0, 0.08], [0, 4.9, 9.72], materials.mustard, "bank-signage", { solid: false });
+      makeFixtureBox(group, building, "Bank:crest", [7.4, 1.0, 0.08], [0, 4.9, 9.72], materials.mustard, "bank-signage", {
+        solid: false,
+        atlasTile: "sign_bank",
+        atlasContain: true,
+      });
       addPendantLights(group, building, profile, materials, [[-4, -1], [1, -1], [6, -1], [0, 6]]);
     }
 
@@ -1296,7 +1660,10 @@
 
     function buildPoliceStation(group, building, profile, materials) {
       addCounter(group, building, { name: "PoliceReception", x: 0, z: -7.7, width: 7.6, depth: 1.45, role: "reception", material: materials.blue }, materials);
-      makeFixtureBox(group, building, "PoliceReception:badge", [1.2, 1.2, 0.08], [0, 2.35, -8.45], materials.mustard, "police-signage", { solid: false });
+      makeFixtureBox(group, building, "PoliceReception:badge", [1.2, 1.2, 0.08], [0, 2.35, -8.45], materials.mustard, "police-signage", {
+        solid: false,
+        atlasTile: "sign_police",
+      });
       addRug(group, building, "PoliceLobby:rug", [11.5, 5.8], [-4.8, -4.2], materials.blue, "lobby");
       addSofa(group, building, "PoliceLobby:bench", [-6.4, -4.3], 5.5, materials.blue, "lobby-bench");
       for (let desk = 0; desk < 4; desk += 1) {
@@ -1306,7 +1673,11 @@
         makeFixtureBox(group, building, `OfficerDesk:${desk}:monitor`, [0.72, 0.58, 0.22], [x, 1.28, z], materials.black, "officer-desk", { solid: false });
       }
       addDisplayShelf(group, building, { name: "EvidenceCabinet", x: 7.4, z: 9.2, width: 7.3, depth: 0.72, height: 3.1, role: "evidence-cabinet", productMaterial: materials.mustard }, materials);
-      makeFixtureBox(group, building, "PoliceNoticeBoard", [6.2, 2.6, 0.08], [7.6, 2.6, -10.45], materials.darkWood, "notice-board", { solid: false });
+      makeFixtureBox(group, building, "PoliceNoticeBoard", [6.2, 2.6, 0.08], [7.6, 2.6, -10.45], materials.darkWood, "notice-board", {
+        solid: false,
+        atlasTile: "sign_notice",
+        atlasContain: true,
+      });
       for (let note = 0; note < 7; note += 1) {
         makeFixtureBox(group, building, `PoliceNoticeBoard:note:${note}`, [0.62, 0.72, 0.04], [5.25 + (note % 4) * 1.45, 2.05 + Math.floor(note / 4) * 1.05, -10.38], note % 2 ? materials.cream : materials.red, "notice-board", { solid: false });
       }
@@ -1628,6 +1999,14 @@
       runtime.themeFixtureCount = 0;
       runtime.fixtureRoles.clear();
       runtime.interiorMaterials.clear();
+      interiorAtlasMaterialCache = {
+        neutral: new WeakMap(),
+        tinted: new WeakMap(),
+      };
+      runtime.interiorAtlasVisualCount = 0;
+      runtime.bookStripCount = 0;
+      runtime.productStripCount = 0;
+      runtime.garmentTextureCount = 0;
       runtime.legacySurfaceCount = 0;
       const created = createInteriorScene(building);
       runtime.activeBuilding = building;
@@ -1749,6 +2128,14 @@
       runtime.themeFixtureCount = 0;
       runtime.fixtureRoles.clear();
       runtime.interiorMaterials.clear();
+      interiorAtlasMaterialCache = {
+        neutral: new WeakMap(),
+        tinted: new WeakMap(),
+      };
+      runtime.interiorAtlasVisualCount = 0;
+      runtime.bookStripCount = 0;
+      runtime.productStripCount = 0;
+      runtime.garmentTextureCount = 0;
       runtime.legacySurfaceCount = 0;
       runtime.originalBuildingDimensions = null;
       runtime.originalInteractionPositions = [];
@@ -2158,6 +2545,7 @@
 
     function publicState() {
       const altitudes = runtime.cloudGroups.map((cloud) => cloud.object.position.y);
+      const atlasState = atlasApi?.getState?.() || {};
       runtime.legacySurfaceCount = countLegacyRoomSurfaces();
       return {
         ready: runtime.ready,
@@ -2178,6 +2566,20 @@
         lastCollisionObject: runtime.lastCollisionObject,
         suppressedMessages: runtime.suppressedMessages,
         sceneSwitches: runtime.sceneSwitches,
+        atlas: {
+          status: runtime.atlasStatus,
+          ready: runtime.atlasStatus === "ready",
+          error: runtime.atlasError || atlasState.error || null,
+          url: atlasState.url || atlasApi?.url || null,
+          tileCount: atlasState.tileCount || Object.keys(atlasApi?.tiles || {}).length,
+          textureUuid: atlasTexture?.uuid || atlasState.textureUuid || null,
+          exteriorSignCount: runtime.exteriorAtlasSignCount,
+          interiorVisualCount: runtime.interiorAtlasVisualCount,
+          bookStripCount: runtime.bookStripCount,
+          productStripCount: runtime.productStripCount,
+          garmentTextureCount: runtime.garmentTextureCount,
+          sharedTexture: Boolean(atlasTexture),
+        },
         clouds: {
           count: runtime.cloudGroups.length,
           meshCount: runtime.cloudGroups.length * 2,
@@ -2214,6 +2616,7 @@
       testApi.__enhancementsInstalled = true;
     }
 
+    enhanceExteriorSigns();
     runtime.ready = true;
     installTestBridge();
 

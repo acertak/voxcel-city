@@ -58,6 +58,8 @@ const runtime = {
   handle: null,
   geometries: new Map(),
   catalogInfo: null,
+  atlasTexture: null,
+  atlasError: null,
   playerRoot: null,
   playerParts: null,
   playerMaterials: null,
@@ -129,6 +131,7 @@ function findPrototypeConstructor(object, methodName) {
 function resolveCoreThree(handle) {
   let sampleMesh = null;
   let standardMaterial = null;
+  let textureReference = null;
   handle.scene.traverse((object) => {
     if (!sampleMesh && object.isMesh && object.geometry?.getAttribute?.("position")) {
       sampleMesh = object;
@@ -140,6 +143,7 @@ function resolveCoreThree(handle) {
       if (!standardMaterial && material?.type === "MeshStandardMaterial" && material.color) {
         standardMaterial = material;
       }
+      if (!textureReference && material?.map?.transformUv) textureReference = material.map;
     }
   });
 
@@ -148,7 +152,10 @@ function resolveCoreThree(handle) {
     ? findPrototypeConstructor(sampleMesh.geometry, "setAttribute")
     : null;
   const BufferAttribute = position ? findPrototypeConstructor(position, "setUsage") : null;
-  if (!sampleMesh || !standardMaterial || !BufferGeometry || !BufferAttribute) {
+  const Texture = textureReference
+    ? findPrototypeConstructor(textureReference, "transformUv")
+    : null;
+  if (!sampleMesh || !standardMaterial || !BufferGeometry || !BufferAttribute || !Texture) {
     throw new Error("Could not resolve the game's Three.js constructors");
   }
 
@@ -217,6 +224,8 @@ function resolveCoreThree(handle) {
     Matrix4: handle.playerRoot.matrix.constructor,
     Vector3: handle.playerRoot.position.constructor,
     Color: standardMaterial.color.constructor,
+    Texture,
+    textureReference,
   };
 }
 
@@ -299,6 +308,8 @@ async function loadGeometryCatalog() {
   const variantSets = new Map();
   let schema = 0;
   let triangleCount = 0;
+  let texturedGeometryCount = 0;
+  const atlasIds = new Set();
 
   for (const node of json.nodes || []) {
     if (!node.name?.startsWith("GEO_") || !Number.isInteger(node.mesh)) continue;
@@ -308,7 +319,11 @@ async function loadGeometryCatalog() {
     }
     const position = readAccessor(json, binaryChunk, primitive.attributes?.POSITION);
     const normal = readAccessor(json, binaryChunk, primitive.attributes?.NORMAL);
+    const uv = readAccessor(json, binaryChunk, primitive.attributes?.TEXCOORD_0);
     const index = readAccessor(json, binaryChunk, primitive.indices);
+    if (uv.itemSize !== 2 || uv.array.length / uv.itemSize !== position.array.length / position.itemSize) {
+      throw new Error(`Invalid modular character UV data: ${node.name}`);
+    }
     const geometry = new THREE_CORE.BufferGeometry();
     geometry.name = `${node.name}_geometry`;
     geometry.setAttribute(
@@ -319,7 +334,13 @@ async function loadGeometryCatalog() {
       "normal",
       new THREE_CORE.BufferAttribute(normal.array, normal.itemSize, normal.normalized),
     );
+    geometry.setAttribute(
+      "uv",
+      new THREE_CORE.BufferAttribute(uv.array, uv.itemSize, uv.normalized),
+    );
     geometry.setIndex(new THREE_CORE.BufferAttribute(index.array, 1, index.normalized));
+    geometry.userData.voxcelAtlas = node.extras?.voxcel_atlas || null;
+    geometry.userData.voxcelAtlasTile = Number(node.extras?.voxcel_atlas_tile);
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     geometries.set(node.name, geometry);
@@ -327,6 +348,8 @@ async function loadGeometryCatalog() {
     const semantic = node.extras?.voxcel_semantic;
     const variant = Number(node.extras?.voxcel_variant);
     schema = Math.max(schema, Number(node.extras?.voxcel_schema) || 0);
+    if (geometry.userData.voxcelAtlas) atlasIds.add(geometry.userData.voxcelAtlas);
+    texturedGeometryCount += 1;
     if (semantic && Number.isInteger(variant) && variant >= 0) {
       if (!variantSets.has(semantic)) variantSets.set(semantic, new Set());
       variantSets.get(semantic).add(variant);
@@ -363,6 +386,8 @@ async function loadGeometryCatalog() {
       schema,
       geometryCount: geometries.size,
       triangleCount: Math.round(triangleCount),
+      texturedGeometryCount,
+      atlas: atlasIds.size === 1 ? [...atlasIds][0] : null,
       variantCounts,
     },
   };
@@ -371,6 +396,7 @@ async function loadGeometryCatalog() {
 function makeMaterial(color) {
   return new THREE_CORE.MeshStandardMaterial({
     color,
+    map: runtime.atlasTexture,
     roughness: 0.82,
     metalness: 0,
     flatShading: true,
@@ -1085,6 +1111,11 @@ function publicState() {
     error: runtime.error || (hookError instanceof Error ? hookError.message : hookError || null),
     hookRegistered: Boolean(runtime.unregisterBeforeRender?.active),
     catalog: runtime.catalogInfo,
+    atlas: {
+      ready: Boolean(runtime.atlasTexture),
+      error: runtime.atlasError,
+      textureUuid: runtime.atlasTexture?.uuid || null,
+    },
     player: {
       mounted: Boolean(runtime.playerRoot),
       attached: Boolean(
@@ -1127,7 +1158,8 @@ function publicState() {
       npcGeometries: npcGeometryIds.size,
       sharedGeometryCount,
       npcMaterials: runtime.npcMaterial ? 1 : 0,
-      npcTextures: 0,
+      npcTextures: runtime.npcMaterial?.map ? 1 : 0,
+      sharedAtlasTexture: runtime.atlasTexture?.uuid || null,
       npcMeshSlots: runtime.renderedNpcSlots,
       drawCallUpperBound: runtime.activeNpcBuckets,
     },
@@ -1183,6 +1215,8 @@ function dispose() {
   runtime.renderedNpcSlots = 0;
   runtime.activeNpcBuckets = 0;
   runtime.catalogInfo = null;
+  runtime.atlasTexture = null;
+  runtime.atlasError = null;
   runtime.appearanceSignature = "";
   runtime.lastFrameTime = 0;
   runtime.playerWorldPosition = null;
@@ -1209,6 +1243,22 @@ async function initialize() {
   const { handle, enhancements } = await waitForRuntime();
   runtime.handle = handle;
   THREE_CORE = resolveCoreThree(handle);
+  const atlasApi = window.__voxcelTextureAtlas;
+  if (atlasApi?.getTexture) {
+    try {
+      runtime.atlasTexture = await atlasApi.getTexture({
+        TextureConstructor: THREE_CORE.Texture,
+        referenceTexture: THREE_CORE.textureReference,
+        renderer: handle.renderer,
+      });
+    } catch (error) {
+      runtime.atlasError = error instanceof Error ? error.message : String(error);
+      console.warn("Voxcel character atlas could not be loaded; using solid colors.", error);
+    }
+  } else {
+    runtime.atlasError = "texture-atlas-runtime-unavailable";
+    console.warn("Voxcel character atlas runtime is unavailable; using solid colors.");
+  }
   initializeScratchObjects();
   const catalog = await loadGeometryCatalog();
   runtime.geometries = catalog.geometries;

@@ -6,6 +6,7 @@
 <title>Block City Life v3</title>
 <link rel="icon" href="data:,">
 <link rel="preload" href="/models/modular-character-parts.glb" as="fetch" type="model/gltf-binary" crossorigin="anonymous">
+<link rel="preload" href="/images/voxcel-detail-atlas.jpg" as="image" type="image/jpeg" fetchpriority="high">
 <style>
 :root{--panel:rgba(10,16,30,0.82);--border:rgba(255,255,255,0.14);--text:#eef4ff;--accent:#6fd4ff;--accent2:#ffd666;--pink:#ff7fc6;--green:#5ddb6a;--red:#ff6b6b}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3815,6 +3816,7 @@ void main() {
 
 </script>
 <!-- Legacy inline avatar removed; modular-character-system.js owns characters. -->
+<script src="/texture-atlas-system.js"></script>
 <script src="/world-enhancements.js"></script>
 <script type="module" src="/modular-character-system.js"></script>
 </body>
