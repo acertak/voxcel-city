@@ -9,7 +9,7 @@ const root = process.cwd();
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const ENHANCED_PLAYER_HANDLE =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,enterBuilding:c4,exitBuilding:ug,notify:PP}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,trafficLights:de,stopLines:J8,getCameraYaw:()=>be,setCameraYaw:(yaw)=>{if(Number.isFinite(yaw))be=yaw},enterBuilding:c4,exitBuilding:ug,notify:PP}";
 const LEGACY_AVATAR_LOADER_ENABLED = false;
 
 const contentTypes = {

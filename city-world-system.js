@@ -18,6 +18,8 @@
     callPanelZ: 12.265,
     boardingThresholdZ: 11.58,
     boardingLimitZ: 12.24,
+    cabinSceneFrontZ: 4.46,
+    disembarkingThresholdZ: 5.22,
     doorwayHalfWidth: 0.62,
   });
 
@@ -42,6 +44,7 @@
     elevatorCabinEntered: false,
     elevatorTargetFloor: null,
     elevatorBoardingArmed: false,
+    elevatorDisembarkingArmed: false,
     movedResidenceCount: 0,
     movedResidenceObjectCount: 0,
     clearedTreeCount: 0,
@@ -880,9 +883,41 @@
     return enterElevator();
   }
 
+  function tryNaturalElevatorDisembarking() {
+    if (
+      boardingTransitionPending ||
+      !state.elevatorDisembarkingArmed ||
+      state.elevatorMode !== "arrived" ||
+      !state.elevatorDoorsOpen ||
+      !state.elevatorCabinEntered ||
+      state.elevatorTargetFloor === null ||
+      state.floorChangePending ||
+      !isInsideOffice() ||
+      !isElevatorSceneActive() ||
+      !officeBuilding ||
+      !runtime?.playerRoot?.position
+    ) {
+      return false;
+    }
+    const doorProgress = window.__voxcelEnhancements?.getElevatorDoorProgress?.() ?? 0;
+    if (doorProgress < 0.82) return false;
+
+    const player = runtime.playerRoot.position;
+    const localX = player.x - officeBuilding.x;
+    const localZ = player.z - officeBuilding.z;
+    if (
+      Math.abs(localX - OFFICE_ELEVATOR_LAYOUT.centerX) > OFFICE_ELEVATOR_LAYOUT.doorwayHalfWidth ||
+      localZ < OFFICE_ELEVATOR_LAYOUT.cabinSceneFrontZ ||
+      localZ > OFFICE_ELEVATOR_LAYOUT.disembarkingThresholdZ
+    ) {
+      return false;
+    }
+    return leaveElevator();
+  }
+
   function updateNaturalElevatorExperience() {
     updateElevatorCallControls();
-    tryNaturalElevatorBoarding();
+    if (!tryNaturalElevatorBoarding()) tryNaturalElevatorDisembarking();
   }
 
   function registerElevatorFrameWatcher() {
@@ -1026,6 +1061,7 @@
       return false;
     }
     state.elevatorBoardingArmed = false;
+    state.elevatorDisembarkingArmed = false;
     setElevatorMode("inside-open", { doorsOpen: true, cabinEntered: true });
     hideElevatorModal();
     hideElevatorCallControls();
@@ -1048,10 +1084,23 @@
   }
 
   function leaveElevator() {
-    if (state.elevatorMode !== "arrived" || !isElevatorSceneActive()) return false;
-    window.__voxcelEnhancements?.exitElevatorScene?.();
+    if (
+      boardingTransitionPending ||
+      state.elevatorMode !== "arrived" ||
+      !state.elevatorDoorsOpen ||
+      !isElevatorSceneActive()
+    ) {
+      return false;
+    }
+    boardingTransitionPending = true;
+    const sceneResult = window.__voxcelEnhancements?.exitElevatorScene?.();
+    if (sceneResult === false) {
+      boardingTransitionPending = false;
+      runtime?.notify?.("エレベーターから降りられませんでした");
+      return false;
+    }
     state.elevatorBoardingArmed = false;
-    boardingTransitionPending = false;
+    state.elevatorDisembarkingArmed = false;
     setElevatorMode("call", {
       direction: null,
       doorsOpen: false,
@@ -1059,6 +1108,7 @@
       targetFloor: null,
     });
     closeElevator();
+    boardingTransitionPending = false;
     return true;
   }
 
@@ -1066,7 +1116,12 @@
     switch (state.elevatorMode) {
       case "arriving": return { text: `${state.elevatorDirection === "up" ? "上" : "下"}方向のエレベーターを呼び出し中…`, tone: "arriving" };
       case "opening": return { text: `到着しました。扉が開いています（${state.currentFloor}F）`, tone: "open" };
-      case "arrived": return { text: `エレベーター到着・扉が開いています（${state.currentFloor}F）`, tone: "open" };
+      case "arrived": return {
+        text: state.elevatorCabinEntered && state.elevatorTargetFloor !== null
+          ? `${state.currentFloor}Fに到着しました。正面の扉へ前進すると降りられます`
+          : `エレベーター到着・扉が開いています（${state.currentFloor}F）`,
+        tone: "open",
+      };
       case "inside-open": return { text: "乗り込みました。安全のため扉を閉じてください", tone: "open" };
       case "inside-closed": return { text: "扉が閉まりました。行き先階を押してください", tone: "" };
       case "door-closing": return { text: "行き先を登録しました。扉が閉まります…", tone: "arriving" };
@@ -1115,14 +1170,7 @@
 
     const cabinActions = document.createElement("div");
     cabinActions.className = "office-elevator-cabin-actions";
-    if (state.elevatorMode === "arrived" && state.elevatorTargetFloor !== null) {
-      const enterButton = document.createElement("button");
-      enterButton.type = "button";
-      enterButton.className = "office-elevator-action primary";
-      enterButton.textContent = "扉が開く・降りる";
-      enterButton.addEventListener("click", leaveElevator);
-      cabinActions.appendChild(enterButton);
-    } else if (state.elevatorMode === "inside-open") {
+    if (state.elevatorMode === "inside-open") {
       const closeDoorsButton = document.createElement("button");
       closeDoorsButton.type = "button";
       closeDoorsButton.className = "office-elevator-action primary";
@@ -1253,6 +1301,7 @@
     );
     state.floorChangePending = true;
     state.elevatorTargetFloor = floor;
+    state.elevatorDisembarkingArmed = false;
     try {
       if (state.elevatorMode === "inside-open") {
         setElevatorMode("door-closing", {
@@ -1285,6 +1334,9 @@
           cabinEntered: true,
           targetFloor: floor,
         });
+        state.elevatorDisembarkingArmed = true;
+        hideElevatorModal();
+        runtime?.notify?.("🔔 扉が開きました。正面の扉へ前進すると降りられます");
         return true;
       }
 
@@ -1320,6 +1372,9 @@
         cabinEntered: true,
         targetFloor: floor,
       });
+      state.elevatorDisembarkingArmed = true;
+      hideElevatorModal();
+      runtime?.notify?.("🚶 正面の扉へ前進すると降りられます");
       return true;
     } catch (error) {
       console.error("Office floor change failed.", error);
@@ -1387,6 +1442,7 @@
     state.floorChangePending = false;
     state.elevatorDirection = null;
     state.elevatorBoardingArmed = false;
+    state.elevatorDisembarkingArmed = false;
     boardingTransitionPending = false;
     hideElevatorModal();
     hideElevatorCallControls();
@@ -1439,6 +1495,7 @@
         cabinEntered: state.elevatorCabinEntered,
         targetFloor: state.elevatorTargetFloor,
         boardingArmed: state.elevatorBoardingArmed,
+        disembarkingArmed: state.elevatorDisembarkingArmed,
         boardingTransitionPending,
       },
       callControlsVisible: Boolean(elevatorCallControls?.classList.contains("visible")),

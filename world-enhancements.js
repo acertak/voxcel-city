@@ -171,6 +171,7 @@
     elevatorReturnPosition: null,
     elevatorReturnRotation: null,
     elevatorReturnCameraFov: null,
+    elevatorReturnCameraYaw: null,
     elevatorPhase: "lobby",
   };
 
@@ -2772,6 +2773,10 @@
       };
       runtime.elevatorReturnRotation = playerRoot.rotation.y;
       runtime.elevatorReturnCameraFov = camera.fov;
+      const currentCameraYaw = handle.getCameraYaw?.();
+      runtime.elevatorReturnCameraYaw = Number.isFinite(currentCameraYaw)
+        ? currentCameraYaw
+        : null;
       runtime.elevatorScene.add(playerRoot);
       runtime.elevatorScene.add(playerShadow);
       shiftPlayerTo(
@@ -2779,6 +2784,7 @@
         runtime.activeBuilding.z + OFFICE_ELEVATOR.playerZ + OFFICE_ELEVATOR.sceneZOffset,
       );
       playerRoot.rotation.y = Math.PI;
+      handle.setCameraYaw?.(0);
       camera.position.set(
         runtime.activeBuilding.x + OFFICE_ELEVATOR.centerX + 0.58,
         playerRoot.position.y + 1.88,
@@ -2819,8 +2825,12 @@
         camera.fov = runtime.elevatorReturnCameraFov;
         camera.updateProjectionMatrix?.();
       }
+      if (Number.isFinite(runtime.elevatorReturnCameraYaw)) {
+        handle.setCameraYaw?.(runtime.elevatorReturnCameraYaw);
+      }
       runtime.elevatorReturnRotation = null;
       runtime.elevatorReturnCameraFov = null;
+      runtime.elevatorReturnCameraYaw = null;
       runtime.elevatorReturnPosition = null;
       runtime.elevatorScene.remove(playerRoot);
       runtime.elevatorScene.remove(playerShadow);
@@ -2880,10 +2890,17 @@
 
     function confineElevatorPlayer() {
       if (!runtime.activeBuilding) return;
+      const visual = runtime.officeElevatorVisual;
       const centerX = runtime.activeBuilding.x + OFFICE_ELEVATOR.centerX;
       const frontZ = runtime.activeBuilding.z + OFFICE_ELEVATOR.frontZ + OFFICE_ELEVATOR.sceneZOffset;
+      const canApproachOpenDoor = Boolean(
+        visual?.displayPhase === "arrived" &&
+        visual.doorsOpen &&
+        visual.doorProgress >= 0.82
+      );
+      const frontPadding = canApproachOpenDoor ? 0.56 : 1.05;
       const nextX = Math.max(centerX - 1.86, Math.min(centerX + 1.86, playerRoot.position.x));
-      const nextZ = Math.max(frontZ + 1.05, Math.min(frontZ + 2.42, playerRoot.position.z));
+      const nextZ = Math.max(frontZ + frontPadding, Math.min(frontZ + 2.42, playerRoot.position.z));
       const correctionX = nextX - playerRoot.position.x;
       const correctionZ = nextZ - playerRoot.position.z;
       if (Math.abs(correctionX) < 0.0001 && Math.abs(correctionZ) < 0.0001) return;

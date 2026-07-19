@@ -20,6 +20,7 @@ async function readElevatorState(page) {
       cabinEntered: office.elevatorState.cabinEntered,
       targetFloor: office.elevatorState.targetFloor,
       boardingArmed: office.elevatorState.boardingArmed,
+      disembarkingArmed: office.elevatorState.disembarkingArmed,
       currentFloor: office.currentFloor,
       doorProgress: elevatorVisual?.doorProgress ?? null,
       displayFloor: elevatorVisual?.displayFloor ?? null,
@@ -212,6 +213,13 @@ test("operates the office elevator with call, doors, destination, and animated d
     displayGoal: window.__voxcelEnhancements.getState().elevatorVisual?.displayGoal,
     scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
   })), { timeout: 15_000 }).toEqual({ floor: 25, mode: "arrived", displayGoal: 25, scene: true });
+  await expect.poll(async () => readElevatorState(page)).toMatchObject({
+    mode: "arrived",
+    doorsOpen: true,
+    cabinEntered: true,
+    targetFloor: 25,
+    disembarkingArmed: true,
+  });
   const displayAudit = await page.evaluate(() => {
     const audit = window.__voxcelElevatorDisplayAudit;
     if (!audit) return [];
@@ -229,7 +237,14 @@ test("operates the office elevator with call, doors, destination, and animated d
     Number.isFinite(displayFloor) && displayFloor > 1 && displayFloor < 25
   ))).toBe(true);
 
-  await page.getByRole("button", { name: "扉が開く・降りる" }).click();
+  await expect(page.locator("#mO")).not.toHaveClass(/show/);
+  await expect(page.getByRole("button", { name: "扉が開く・降りる" })).toHaveCount(0);
+  await expect.poll(async () => (await readElevatorState(page)).doorProgress).toBeGreaterThan(0.82);
+  await page.waitForTimeout(160);
+  expect(await page.evaluate(() => window.__voxcelEnhancements.getState().elevatorSceneActive)).toBe(true);
+  await page.keyboard.down("w");
+  await page.waitForTimeout(220);
+  await page.keyboard.up("w");
   await expect.poll(async () => page.evaluate(() => ({
     scene: window.__voxcelEnhancements.getState().elevatorSceneActive,
     activeScene: window.__voxcelEnhancements.getState().activeScene,
@@ -393,6 +408,31 @@ test.describe("mobile natural elevator boarding", () => {
       mode: "moving",
       doorsOpen: false,
       targetFloor: 2,
+    });
+    await expect.poll(async () => readElevatorState(page), { timeout: 5_000 }).toMatchObject({
+      mode: "arrived",
+      doorsOpen: true,
+      currentFloor: 2,
+      disembarkingArmed: true,
+    });
+    await expect(page.locator("#mO")).not.toHaveClass(/show/);
+
+    const exitStart = touchPoint(2, gesture.startX, gesture.startY);
+    const towardDoor = touchPoint(2, gesture.startX, gesture.startY - 90);
+    try {
+      await dispatchTouch(session, "touchStart", [exitStart]);
+      await dispatchTouch(session, "touchMove", [towardDoor]);
+      await expect.poll(async () => page.evaluate(() => (
+        window.__voxcelEnhancements.getState().elevatorSceneActive
+      ))).toBe(false);
+    } finally {
+      await dispatchTouch(session, "touchEnd", []);
+    }
+    await expect.poll(async () => readElevatorState(page)).toMatchObject({
+      mode: "call",
+      cabinEntered: false,
+      disembarkingArmed: false,
+      currentFloor: 2,
     });
   });
 });

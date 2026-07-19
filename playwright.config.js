@@ -9,7 +9,7 @@ export default defineConfig({
   fullyParallel: false,
   use: {
     baseURL: testBaseURL,
-    headless: false,
+    headless: true,
     viewport: { width: 1600, height: 900 },
     launchOptions: {
       args: ["--use-angle=metal", "--enable-unsafe-swiftshader"],
