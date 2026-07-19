@@ -149,8 +149,9 @@ test.describe("50-floor office tower", () => {
     await setPlayer(page, elevator.x, elevator.z - 1.8);
     await page.keyboard.press("e");
     await expect(page.getByRole("heading", { name: "🛗 オフィス・エレベーター" })).toBeVisible();
-    await expect(page.locator(".office-floor-button")).toHaveCount(50);
-    await page.getByRole("button", { name: "25階", exact: true }).click();
+    await expect(page.locator(".office-floor-button")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    expect(await page.evaluate(() => window.__voxcelEnhancements.setOfficeFloor(25))).toBe(true);
 
     state = await page.evaluate(() => window.__voxcelEnhancements.getState());
     expect(state.office).toMatchObject({
@@ -190,7 +191,7 @@ test.describe("50-floor office tower", () => {
       elevatorLabel: "🛗 エレベーター（37F）",
     });
 
-    expect(await page.evaluate(() => window.__voxcelOffice.goToFloor(50))).toBe(true);
+    expect(await page.evaluate(() => window.__voxcelEnhancements.setOfficeFloor(50))).toBe(true);
     state = await page.evaluate(() => window.__voxcelEnhancements.getState());
     expect(state.office).toMatchObject({ currentFloor: 50, variant: "executive" });
     expect(state.fixtureRoles).toEqual(expect.arrayContaining([
@@ -201,7 +202,7 @@ test.describe("50-floor office tower", () => {
     await expect(page.locator(".voxcel-map-current")).toContainText("50階");
     await page.keyboard.press("m");
 
-    expect(await page.evaluate(() => window.__voxcelOffice.goToFloor(1))).toBe(true);
+    expect(await page.evaluate(() => window.__voxcelEnhancements.setOfficeFloor(1))).toBe(true);
     const exit = await page.evaluate(() => {
       const point = window.__voxcelPlayer.buildingViews.office.interiorPts
         .find(({ action }) => action === "exit").pos;
