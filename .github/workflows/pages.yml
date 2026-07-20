@@ -22,8 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - run: npm run prepare:cloudflare-assets
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: .cloudflare-assets
       - id: deployment
         uses: actions/deploy-pages@v4

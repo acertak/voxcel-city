@@ -41,7 +41,10 @@ async function authorizeWithMycraft(request: Request, env: Env): Promise<Respons
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const ENHANCED_PLAYER_HANDLE =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,trafficLights:de,stopLines:J8,getCameraYaw:()=>be,setCameraYaw:(yaw)=>{if(Number.isFinite(yaw))be=yaw},enterBuilding:c4,exitBuilding:ug,notify:PP}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,trafficLights:de,stopLines:J8,movementLocked:!1,getMovementInput:()=>({left:!!(me.a||me.arrowleft),right:!!(me.d||me.arrowright),forward:!!(me.w||me.arrowup),backward:!!(me.s||me.arrowdown),touchX:z4?W8.x:0,touchY:z4?W8.y:0}),setMovementLocked:(locked)=>{window.__voxcelPlayer.movementLocked=!!locked},getCameraYaw:()=>be,setCameraYaw:(yaw)=>{if(Number.isFinite(yaw))be=yaw},getCameraState:()=>({yaw:be,pitch:De,distance:bD,targetDistance:A8}),setCameraState:(next={})=>{Number.isFinite(next.yaw)&&(be=next.yaw),Number.isFinite(next.pitch)&&(De=Math.max(-.3,Math.min(1.2,next.pitch))),Number.isFinite(next.distance)&&(bD=Math.max(4,Math.min(260,next.distance))),Number.isFinite(next.targetDistance)&&(A8=Math.max(4,Math.min(260,next.targetDistance)))},enterBuilding:c4,exitBuilding:ug,notify:PP}";
+const BASE_MOVEMENT_INPUT = "z4&&(P+=W8.x,e-=W8.y),ka(t,A)";
+const LOCKABLE_MOVEMENT_INPUT =
+  "z4&&(P+=W8.x,e-=W8.y),window.__voxcelPlayer?.movementLocked&&(P=0,e=0),ka(t,A)";
 const LEGACY_AVATAR_LOADER_ENABLED = false;
 
 function prepareAppShell(html: string): string {
@@ -54,6 +57,10 @@ function prepareAppShell(html: string): string {
       "N.add(_t);var be=",
       `N.add(_t);${ENHANCED_PLAYER_HANDLE};var be=`,
     );
+  }
+
+  if (prepared.includes(BASE_MOVEMENT_INPUT)) {
+    prepared = prepared.replace(BASE_MOVEMENT_INPUT, LOCKABLE_MOVEMENT_INPUT);
   }
 
   if (
