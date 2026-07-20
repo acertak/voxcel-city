@@ -87,9 +87,10 @@ test.describe("natural city layout and named map", () => {
     await startGame(page);
 
     const state = await page.evaluate(() => window.__voxcelMap.getState());
-    expect(state.locationCount).toBe(14);
+    expect(state.locationCount).toBe(15);
     expect(state.locations.map(({ id }) => id)).toEqual(expect.arrayContaining([
       "conv", "cloth", "salon", "hosp", "bank", "home", "police", "office", "park",
+      "sky-water-athletic",
     ]));
     expect(state.locations.find(({ id }) => id === "office")).toMatchObject({
       name: "シティオフィスタワー",
