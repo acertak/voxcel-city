@@ -3,11 +3,15 @@
 
   if (window.__voxcelAthletics?.ready) return;
 
-  const SYSTEM_VERSION = 3;
+  const SYSTEM_VERSION = 4;
   const GROUND_SURFACE_Y = 0.01;
   const PLAYER_FOOT_OFFSET = 1.19;
   const PLAYER_GROUND_Y = GROUND_SURFACE_Y + PLAYER_FOOT_OFFSET;
   const PLAYER_RADIUS = 0.42;
+  const PLAYER_COLLISION_HEIGHT = 2.18;
+  const MAX_STEP_HEIGHT = 0.56;
+  const JUMP_BUFFER_MS = 190;
+  const COYOTE_TIME_MS = 135;
   const GRAVITY = 19.5;
   const JUMP_VELOCITY = 8.7;
   const WALK_SPEED = 7.4;
@@ -271,6 +275,9 @@
     mode: "idle",
     keys: new Set(),
     jumpQueued: false,
+    jumpHeld: false,
+    jumpBufferUntil: 0,
+    lastGroundedAt: 0,
     velocityX: 0,
     velocityZ: 0,
     velocityY: 0,
@@ -283,6 +290,9 @@
     distanceTravelled: 0,
     jumpCount: 0,
     fallCount: 0,
+    collisionCount: 0,
+    lastCollisionId: null,
+    fallOriginY: null,
     respawnCount: 0,
     lastRespawnReason: null,
     respawnAt: 0,
@@ -310,6 +320,7 @@
   const interactions = [];
   const animations = [];
   const geometryCache = new Map();
+  const officialStaticInstanceBatches = new Map();
   const routeDefinitions = new Map();
   const checkpointVisualsByArea = new Map();
   const officialRepresentations = [];
@@ -375,7 +386,10 @@
     const found = {
       Group: handle.playerRoot?.constructor,
       Vector3: handle.playerRoot?.position?.constructor,
+      Matrix4: handle.playerRoot?.matrix?.constructor,
       Mesh: null,
+      InstancedMesh: null,
+      BufferAttribute: null,
       BoxGeometry: null,
       PlaneGeometry: null,
       CylinderGeometry: null,
@@ -388,7 +402,19 @@
     };
     handle.scene.traverse((object) => {
       if (!found.Mesh && object.isMesh) found.Mesh = object.constructor;
+      if (!found.InstancedMesh && object.isInstancedMesh) found.InstancedMesh = object.constructor;
       const geometry = object.geometry;
+      const positionAttribute = geometry?.getAttribute?.("position");
+      if (!found.BufferAttribute && positionAttribute) {
+        let prototype = Object.getPrototypeOf(positionAttribute);
+        while (prototype) {
+          if (Object.prototype.hasOwnProperty.call(prototype, "setUsage")) {
+            found.BufferAttribute = prototype.constructor;
+            break;
+          }
+          prototype = Object.getPrototypeOf(prototype);
+        }
+      }
       if (geometry?.type === "BoxGeometry" && !found.BoxGeometry) found.BoxGeometry = geometry.constructor;
       if (geometry?.type === "PlaneGeometry" && !found.PlaneGeometry) found.PlaneGeometry = geometry.constructor;
       if (geometry?.type === "CylinderGeometry" && !found.CylinderGeometry) found.CylinderGeometry = geometry.constructor;
@@ -405,7 +431,181 @@
         }
       }
     });
+    if (!found.InstancedMesh && found.Mesh && found.BufferAttribute && found.Matrix4) {
+      const BufferAttribute = found.BufferAttribute;
+      found.InstancedMesh = class VoxcelAthleticInstancedMesh extends found.Mesh {
+        constructor(instanceGeometry, instanceMaterial, capacity) {
+          super(instanceGeometry, instanceMaterial);
+          this.type = "InstancedMesh";
+          this.isInstancedMesh = true;
+          this.instanceMatrix = new BufferAttribute(new Float32Array(capacity * 16), 16);
+          this.instanceMatrix.isInstancedBufferAttribute = true;
+          this.instanceMatrix.meshPerAttribute = 1;
+          this.instanceColor = null;
+          this.count = capacity;
+          this.voxcelInstanceCapacity = capacity;
+        }
+
+        setMatrixAt(index, matrix) {
+          matrix.toArray(this.instanceMatrix.array, index * 16);
+        }
+
+        getMatrixAt(index, matrix) {
+          matrix.fromArray(this.instanceMatrix.array, index * 16);
+        }
+      };
+    }
     return found;
+  }
+
+  function queueOfficialStaticPrimitive(representation, descriptor) {
+    const {
+      name,
+      role,
+      type,
+      material,
+      position,
+      scale,
+      segments = type === "torus" ? 16 : 8,
+      rotationX = 0,
+      rotationY = 0,
+      rotationZ = 0,
+      castShadow = false,
+      receiveShadow = true,
+      componentType,
+    } = descriptor;
+    if (!constructors.InstancedMesh) {
+      if (type === "box") {
+        return tagOfficialMesh(addBox(name, role, scale, position, material, {
+          rotationX,
+          rotationY,
+          rotationZ,
+          castShadow,
+          receiveShadow,
+          solid: false,
+          blocker: false,
+        }), representation);
+      }
+      if (type === "cylinder") {
+        return tagOfficialMesh(addCylinder(name, role, scale[0], scale[1], position, material, {
+          rotationX,
+          rotationY,
+          rotationZ,
+          segments,
+          castShadow,
+          receiveShadow,
+          solid: false,
+          blocker: false,
+        }), representation);
+      }
+      return tagOfficialMesh(addTorus(name, role, scale[0], scale[2] * 0.18, position, material, {
+        rotationX,
+        rotationY,
+        rotationZ,
+        segments,
+        castShadow,
+        receiveShadow,
+      }), representation);
+    }
+
+    recordRole(role, false);
+    representation.meshCount += 1;
+    state.officialAttractionMeshCount += 1;
+    const partition = representation.areaId || "facility";
+    const key = [
+      role,
+      partition,
+      type,
+      segments,
+      material.uuid || material.name,
+      castShadow ? 1 : 0,
+      receiveShadow ? 1 : 0,
+    ].join(":");
+    let batch = officialStaticInstanceBatches.get(key);
+    if (!batch) {
+      batch = {
+        key,
+        role,
+        partition,
+        type,
+        segments,
+        material,
+        castShadow,
+        receiveShadow,
+        entries: [],
+      };
+      officialStaticInstanceBatches.set(key, batch);
+    }
+    batch.entries.push({
+      name,
+      position,
+      scale,
+      rotationX,
+      rotationY,
+      rotationZ,
+      componentType,
+      officialId: representation.officialId,
+      officialName: representation.name,
+      areaId: representation.areaId,
+    });
+    return null;
+  }
+
+  function flushOfficialStaticInstanceBatches() {
+    const instanceCount = [...officialStaticInstanceBatches.values()]
+      .reduce((total, batch) => total + batch.entries.length, 0);
+    if (!constructors.InstancedMesh || instanceCount === 0) {
+      root.userData.voxcelStaticBatching = {
+        enabled: false,
+        batchCount: 0,
+        instanceCount: 0,
+        drawObjectSavings: 0,
+      };
+      return;
+    }
+
+    const componentCounts = {};
+    let batchIndex = 0;
+    for (const batch of officialStaticInstanceBatches.values()) {
+      const batchGeometry = geometry(batch.type, batch.segments);
+      const mesh = new constructors.InstancedMesh(batchGeometry, batch.material, batch.entries.length);
+      mesh.name = `GreeniaBatch:${batch.role}:${batch.partition}:${batch.type}:${batchIndex}`;
+      mesh.castShadow = batch.castShadow;
+      mesh.receiveShadow = batch.receiveShadow;
+      mesh.frustumCulled = false;
+      mesh.userData.voxcelAthletic = true;
+      mesh.userData.voxcelAthleticRole = batch.role;
+      mesh.userData.voxcelAthleticSolid = false;
+      mesh.userData.collisionMode = "none";
+      mesh.userData.voxcelLogicalInstanceCount = batch.entries.length;
+      mesh.userData.voxcelInstanceMetadata = batch.entries.map((entry) => ({
+        name: `Greenia:${entry.name}`,
+        componentType: entry.componentType,
+        officialAttractionId: entry.officialId,
+        officialAttractionName: entry.officialName,
+        officialAttractionAreaId: entry.areaId,
+      }));
+      const transform = new constructors.Mesh(batchGeometry, batch.material);
+      batch.entries.forEach((entry, index) => {
+        transform.position.set(entry.position[0], entry.position[1], entry.position[2]);
+        transform.rotation.set(entry.rotationX, entry.rotationY, entry.rotationZ);
+        transform.scale.set(entry.scale[0], entry.scale[1], entry.scale[2]);
+        transform.updateMatrix();
+        mesh.setMatrixAt(index, transform.matrix);
+        componentCounts[entry.componentType] = (componentCounts[entry.componentType] || 0) + 1;
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      root.add(mesh);
+      batchIndex += 1;
+    }
+    root.userData.voxcelStaticBatching = {
+      enabled: true,
+      batchCount: batchIndex,
+      instanceCount,
+      drawObjectSavings: Math.max(0, instanceCount - batchIndex),
+      componentCounts,
+    };
+    officialStaticInstanceBatches.clear();
   }
 
   function geometry(type, segments = 8) {
@@ -489,6 +689,25 @@
             context.stroke();
           }
         }
+      } else if (mode === "rope") {
+        for (let offset = -512; offset < 1024; offset += 26) {
+          context.strokeStyle = offset % 52 === 0 ? "rgba(255,246,194,.34)" : "rgba(73,48,18,.25)";
+          context.lineWidth = 8;
+          context.beginPath();
+          context.moveTo(offset, 0);
+          context.lineTo(offset + 512, 512);
+          context.stroke();
+        }
+        for (let fiber = 0; fiber < 420; fiber += 1) {
+          const x = random() * 512;
+          const y = random() * 512;
+          context.strokeStyle = fiber % 3 ? "rgba(255,255,225,.16)" : "rgba(55,34,13,.18)";
+          context.lineWidth = 1;
+          context.beginPath();
+          context.moveTo(x, y);
+          context.lineTo(x + 7 + random() * 11, y + 7 + random() * 11);
+          context.stroke();
+        }
       } else if (mode === "water") {
         for (let y = 18; y < 512; y += 30) {
           context.strokeStyle = y % 60 ? "rgba(255,255,255,.24)" : "rgba(8,95,150,.25)";
@@ -555,6 +774,9 @@
     const dirtMap = patternTexture("trail-earth", ["#a77645", "#e0bc75", "#6c492e"], "stone", 22);
     const woodMap = patternTexture("cedar-wood", ["#6d391f", "#c68443", "#f5cf83"], "wood", 33);
     const darkWoodMap = patternTexture("dark-wood", ["#321b18", "#724128", "#bd7a45"], "wood", 34);
+    const lightWoodMap = patternTexture("light-cedar-wood", ["#ad7133", "#edbf68", "#fff0ad"], "wood", 35);
+    const ropeMap = patternTexture("braided-rope", ["#aa8746", "#e3c97b", "#fff1b8"], "rope", 36);
+    const whiteRopeMap = patternTexture("white-braided-rope", ["#bfc2b8", "#f7f5df", "#ffffff"], "rope", 37);
     const waterMap = patternTexture("rokko-water", ["#087faf", "#45d2e7", "#c7fbff"], "water", 44);
     const camoMap = patternTexture("warped-wall-camo", ["#314536", "#79904a", "#1e3027", "#a49e58", "#526a3e"], "camo", 55);
     const rubberMap = patternTexture("safety-rubber", ["#e04f5f", "#ffcf45", "rgba(255,255,255,.32)"], "rubber", 66);
@@ -566,8 +788,9 @@
     materials.path = createMaterial("path", 0xffffff, { map: dirtMap, roughness: 0.96 });
     materials.wood = createMaterial("wood", 0xffffff, { map: woodMap, roughness: 0.86 });
     materials.darkWood = createMaterial("dark-wood", 0xffffff, { map: darkWoodMap, roughness: 0.9 });
-    materials.lightWood = createMaterial("light-wood", 0xdba55a, { roughness: 0.83 });
-    materials.rope = createMaterial("rope", 0xd8b96e, { roughness: 0.94 });
+    materials.lightWood = createMaterial("light-wood", 0xffffff, { map: lightWoodMap, roughness: 0.83 });
+    materials.rope = createMaterial("rope", 0xffffff, { map: ropeMap, roughness: 0.94 });
+    materials.whiteRope = createMaterial("white-rope", 0xffffff, { map: whiteRopeMap, roughness: 0.96 });
     materials.steel = createMaterial("steel", 0x334a59, { roughness: 0.34, metalness: 0.62 });
     materials.water = createMaterial("water", 0xffffff, {
       map: waterMap,
@@ -605,6 +828,21 @@
     else state.decorativeMeshCount += 1;
   }
 
+  function parkCollisionRole(role) {
+    const normalizedRole = String(role || "");
+    return normalizedRole === "official-attraction"
+      || normalizedRole === "mt-king"
+      || normalizedRole === "kingdom"
+      || normalizedRole === "water-course"
+      || normalizedRole === "yahhoy"
+      || normalizedRole === "de-kairiki"
+      || normalizedRole === "mecya-forest"
+      || normalizedRole === "zip-slide"
+      || normalizedRole === "chibidoland"
+      || normalizedRole.startsWith("official-gate")
+      || normalizedRole.startsWith("official-forest");
+  }
+
   function decorateMesh(mesh, name, role, options = {}) {
     mesh.name = `Greenia:${name}`;
     mesh.castShadow = options.castShadow ?? Boolean(options.solid);
@@ -618,14 +856,28 @@
   }
 
   function addBox(name, role, size, position, material, options = {}) {
-    const mesh = decorateMesh(new constructors.Mesh(geometry("box"), material), name, role, options);
+    const implicitSolid = (
+      parkCollisionRole(role)
+      && !options.parent
+      && options.blocker !== false
+      && size[0] >= 0.16
+      && size[1] >= 0.28
+      && size[2] >= 0.16
+      && size[0] * size[1] * size[2] >= 0.055
+    );
+    const colliderSolid = options.solid ?? implicitSolid;
+    const mesh = decorateMesh(new constructors.Mesh(geometry("box"), material), name, role, {
+      ...options,
+      solid: colliderSolid,
+      castShadow: options.castShadow ?? colliderSolid,
+    });
     mesh.scale.set(size[0], size[1], size[2]);
     mesh.position.set(position[0], position[1], position[2]);
     if (options.rotationX) mesh.rotation.x = options.rotationX;
     if (options.rotationY) mesh.rotation.y = options.rotationY;
     if (options.rotationZ) mesh.rotation.z = options.rotationZ;
     (options.parent || root).add(mesh);
-    if (options.solid && options.blocker !== false) {
+    if (colliderSolid && options.blocker !== false) {
       addBlocker(
         `mesh-${name}`,
         position[0],
@@ -634,30 +886,38 @@
         size[2],
         position[1] - size[1] / 2,
         position[1] + size[1] / 2,
-        { rotationY: options.rotationY ?? 0 },
+        { rotationY: options.rotationY ?? 0, source: mesh },
       );
     }
     return mesh;
   }
 
   function addCylinder(name, role, radius, height, position, material, options = {}) {
-    const mesh = decorateMesh(new constructors.Mesh(geometry("cylinder", options.segments ?? 8), material), name, role, options);
+    const implicitSolid = parkCollisionRole(role) && !options.parent && radius >= 0.12 && height >= 0.3;
+    const colliderSolid = options.solid ?? implicitSolid;
+    const mesh = decorateMesh(new constructors.Mesh(geometry("cylinder", options.segments ?? 8), material), name, role, {
+      ...options,
+      solid: colliderSolid,
+      castShadow: options.castShadow ?? (colliderSolid || radius >= 0.075),
+    });
     mesh.scale.set(radius, height, radius);
     mesh.position.set(position[0], position[1], position[2]);
     if (options.rotationX) mesh.rotation.x = options.rotationX;
     if (options.rotationY) mesh.rotation.y = options.rotationY;
     if (options.rotationZ) mesh.rotation.z = options.rotationZ;
     (options.parent || root).add(mesh);
-    if (options.solid && options.blocker !== false) {
-      addBlocker(
-        `mesh-${name}`,
-        position[0],
-        position[2],
-        radius * 2,
-        radius * 2,
-        position[1] - height / 2,
-        position[1] + height / 2,
-      );
+    if (colliderSolid && options.blocker !== false) {
+      const horizontalX = Math.abs(Math.sin(options.rotationZ ?? 0)) > 0.5;
+      const horizontalZ = Math.abs(Math.sin(options.rotationX ?? 0)) > 0.5;
+      const colliderWidth = horizontalX ? height : radius * 2;
+      const colliderDepth = horizontalZ ? height : radius * 2;
+      const halfVertical = horizontalX || horizontalZ ? radius : height / 2;
+      addBlocker(`mesh-${name}`, position[0], position[2], colliderWidth, colliderDepth, position[1] - halfVertical, position[1] + halfVertical, {
+        rotationY: options.rotationY ?? 0,
+        shape: horizontalX || horizontalZ ? "box" : "circle",
+        walkableTop: horizontalX || horizontalZ ? radius >= 0.18 : height <= MAX_STEP_HEIGHT,
+        source: mesh,
+      });
     }
     return mesh;
   }
@@ -711,11 +971,83 @@
     const end = new constructors.Vector3(to[0], to[1], to[2]);
     const direction = end.clone().sub(start);
     const length = direction.length();
-    const mesh = decorateMesh(new constructors.Mesh(geometry("cylinder", options.segments ?? 7), material), name, role, options);
+    const flexibleLine = material === materials.rope || /(?:rope|line|net|stay|hanger|handrail|cable|wire)/i.test(name);
+    const implicitSolid = parkCollisionRole(role) && !options.parent && !flexibleLine && radius >= 0.105 && length >= 0.28;
+    const mesh = decorateMesh(new constructors.Mesh(geometry("cylinder", options.segments ?? 7), material), name, role, {
+      ...options,
+      solid: options.solid ?? implicitSolid,
+      castShadow: options.castShadow ?? (radius >= 0.065 && length <= 80),
+    });
     mesh.scale.set(radius, length, radius);
     mesh.position.copy(start).add(end).multiplyScalar(0.5);
     mesh.quaternion.setFromUnitVectors(new constructors.Vector3(0, 1, 0), direction.normalize());
     (options.parent || root).add(mesh);
+    if ((options.solid ?? implicitSolid) && options.blocker !== false) {
+      const deltaX = to[0] - from[0];
+      const deltaY = to[1] - from[1];
+      const deltaZ = to[2] - from[2];
+      const horizontalLength = Math.hypot(deltaX, deltaZ);
+      const nearVertical = horizontalLength <= radius * 0.5;
+      const walkable = !nearVertical && Math.abs(deltaY) / Math.max(length, 0.001) <= 0.38 && radius >= 0.18;
+      const rotationY = nearVertical ? 0 : Math.atan2(deltaX, deltaZ);
+      let walkableSurface = null;
+      if (walkable && options.walkableSurface) {
+        const surfaceWidth = radius * 2;
+        const surfaceDepth = horizontalLength + radius * 2;
+        const cos = Math.cos(rotationY);
+        const sin = Math.sin(rotationY);
+        const centerX = (from[0] + to[0]) / 2;
+        const centerZ = (from[2] + to[2]) / 2;
+        const centerY = (from[1] + to[1]) / 2 + radius;
+        const axisX = deltaX / Math.max(horizontalLength, 0.001);
+        const axisZ = deltaZ / Math.max(horizontalLength, 0.001);
+        walkableSurface = addSurface(
+          options.surfaceId || `beam-surface-${name}`,
+          centerX,
+          centerZ,
+          Math.abs(cos) * surfaceWidth + Math.abs(sin) * surfaceDepth,
+          Math.abs(sin) * surfaceWidth + Math.abs(cos) * surfaceDepth,
+          centerY,
+          {
+            areaId: options.areaId,
+            contains(x, z) {
+              const dx = x - centerX;
+              const dz = z - centerZ;
+              const localX = dx * cos - dz * sin;
+              const localZ = dx * sin + dz * cos;
+              const padding = Math.min(PLAYER_RADIUS * 0.08, radius * 0.16);
+              return Math.abs(localX) <= surfaceWidth / 2 - padding
+                && Math.abs(localZ) <= surfaceDepth / 2 - padding;
+            },
+            heightAt(x, z) {
+              const along = clamp(
+                (x - from[0]) * axisX + (z - from[2]) * axisZ,
+                0,
+                horizontalLength,
+              );
+              return from[1] + deltaY * along / Math.max(horizontalLength, 0.001) + radius;
+            },
+          },
+        );
+      }
+      addBlocker(
+        `beam-${name}`,
+        (from[0] + to[0]) / 2,
+        (from[2] + to[2]) / 2,
+        nearVertical ? radius * 2 : radius * 2,
+        nearVertical ? radius * 2 : horizontalLength + radius * 2,
+        Math.min(from[1], to[1]) - radius,
+        Math.max(from[1], to[1]) + radius,
+        {
+          rotationY,
+          shape: nearVertical ? "circle" : "box",
+          walkableTop: walkable,
+          thickness: walkableSurface ? radius * 2 : null,
+          surface: walkableSurface,
+          source: mesh,
+        },
+      );
+    }
     return mesh;
   }
 
@@ -735,6 +1067,9 @@
       heightAt: options.heightAt || null,
       contains: options.contains || null,
       object: options.object || null,
+      objectOffsetX: options.object ? x - options.object.position.x : 0,
+      objectOffsetY: options.object ? y - options.object.position.y : 0,
+      objectOffsetZ: options.object ? z - options.object.position.z : 0,
       previousX: x,
       previousZ: z,
       previousY: y,
@@ -779,6 +1114,34 @@
       return Math.abs(localX) <= Math.max(0.04, size[0] / 2 - padding)
         && Math.abs(localZ) <= Math.max(0.04, size[2] / 2 - padding);
     };
+    surface.heightAt = (x, z) => {
+      if (!mesh.localToWorld || (Math.abs(mesh.rotation.x) < 0.0001 && Math.abs(mesh.rotation.z) < 0.0001)) return surface.y;
+      mesh.updateWorldMatrix?.(true, false);
+      const topPoint = mesh.localToWorld(new constructors.Vector3(0, 0.5, 0));
+      const normalPoint = new constructors.Vector3(0, 1, 0);
+      normalPoint.applyQuaternion(mesh.getWorldQuaternion(mesh.quaternion.clone()));
+      if (Math.abs(normalPoint.y) < 0.08) return surface.y;
+      return topPoint.y - (
+        normalPoint.x * (x - topPoint.x) + normalPoint.z * (z - topPoint.z)
+      ) / normalPoint.y;
+    };
+    addBlocker(
+      `playable-${name}`,
+      position[0],
+      position[2],
+      size[0],
+      size[2],
+      position[1] - size[1] / 2,
+      position[1] + size[1] / 2,
+      {
+        rotationY,
+        walkableTop: true,
+        thickness: size[1],
+        dynamic: Boolean(options.dynamic),
+        surface,
+        source: mesh,
+      },
+    );
     return { mesh, surface };
   }
 
@@ -799,7 +1162,7 @@
     const maxX = Math.max(start[0], end[0]) + width / 2;
     const minZ = Math.min(start[2], end[2]) - width / 2;
     const maxZ = Math.max(start[2], end[2]) + width / 2;
-    addSurface(name, (minX + maxX) / 2, (minZ + maxZ) / 2, maxX - minX, maxZ - minZ, Math.max(start[1], end[1]), {
+    const surface = addSurface(name, (minX + maxX) / 2, (minZ + maxZ) / 2, maxX - minX, maxZ - minZ, Math.max(start[1], end[1]), {
       areaId: options.areaId,
       object: mesh,
       contains(x, z) {
@@ -816,6 +1179,22 @@
         return lerp(start[1], end[1], amount);
       },
     });
+    addBlocker(
+      `ramp-${name}`,
+      (start[0] + end[0]) / 2,
+      (start[2] + end[2]) / 2,
+      width,
+      horizontalLength,
+      Math.min(start[1], end[1]) - 0.42,
+      Math.max(start[1], end[1]),
+      {
+        rotationY: Math.atan2(deltaX, deltaZ),
+        walkableTop: true,
+        thickness: 0.42,
+        surface,
+        source: mesh,
+      },
+    );
     return mesh;
   }
 
@@ -825,15 +1204,60 @@
   }
 
   function addBlocker(id, x, z, width, depth, minY, maxY, options = {}) {
-    blockers.push({ id, x, z, width, depth, minY, maxY, rotationY: options.rotationY ?? 0 });
+    const rotationY = options.rotationY ?? 0;
+    blockers.push({
+      id,
+      x,
+      z,
+      width,
+      depth,
+      minY,
+      maxY,
+      rotationY,
+      cos: Math.cos(rotationY),
+      sin: Math.sin(rotationY),
+      shape: options.shape || "box",
+      walkableTop: Boolean(options.walkableTop),
+      thickness: options.thickness ?? null,
+      dynamic: Boolean(options.dynamic),
+      surface: options.surface || null,
+      source: options.source || null,
+    });
     state.blockerCount = blockers.length;
   }
 
-  function blockerContains(x, z, blocker, padding = 0) {
-    const dx = x - blocker.x;
-    const dz = z - blocker.z;
-    const cos = Math.cos(blocker.rotationY || 0);
-    const sin = Math.sin(blocker.rotationY || 0);
+  function blockerState(blocker) {
+    const surface = blocker.surface;
+    const deltaY = surface ? surface.y - surface.baseY : 0;
+    return {
+      x: surface?.x ?? blocker.x,
+      z: surface?.z ?? blocker.z,
+      minY: blocker.minY + deltaY,
+      maxY: blocker.maxY + deltaY,
+      rotationY: blocker.rotationY,
+      cos: blocker.cos,
+      sin: blocker.sin,
+    };
+  }
+
+  function blockerVerticalRange(blocker, current, x, z) {
+    if (!blocker.walkableTop || !blocker.surface || !Number.isFinite(blocker.thickness)) {
+      return { minY: current.minY, maxY: current.maxY };
+    }
+    const maxY = surfaceHeightAt(blocker.surface, x, z);
+    return { minY: maxY - blocker.thickness, maxY };
+  }
+
+  function blockerContains(x, z, blocker, padding = 0, resolvedState = null) {
+    const current = resolvedState || blockerState(blocker);
+    const dx = x - current.x;
+    const dz = z - current.z;
+    if (blocker.shape === "circle") {
+      const radius = Math.max(blocker.width, blocker.depth) / 2 + padding;
+      return dx * dx + dz * dz <= radius * radius;
+    }
+    const cos = current.cos;
+    const sin = current.sin;
     const localX = dx * cos - dz * sin;
     const localZ = dx * sin + dz * cos;
     return Math.abs(localX) <= blocker.width / 2 + padding
@@ -1030,6 +1454,62 @@
       if (Math.abs(x + 235) < 42 && Math.abs(z - 181) < 30) continue;
       addRock(x, z, 0.6 + perimeterRandom() * 1.2, index);
     }
+
+    // Mt. Rokko is read as overlapping forest-floor islands, not one uninterrupted lawn.
+    // These shallow, non-colliding contours sit below the course decks and keep all routes open.
+    const terrainIslands = [
+      [-435, 151, 18, 0.13, 0], [-388, 157, 13, 0.1, 1], [-329, 157, 16, 0.12, 2],
+      [-452, 224, 15, 0.14, 3], [-405, 225, 19, 0.11, 4], [-343, 226, 14, 0.12, 5],
+      [-284, 226, 16, 0.1, 6], [-215, 335, 15, 0.12, 7], [-159, 337, 12, 0.1, 8],
+      [-83, 334, 17, 0.13, 9],
+    ];
+    terrainIslands.forEach(([x, z, radius, height, variant]) => {
+      addCylinder(`rokko-contour-${variant}`, "landscape", radius, height, [x, height / 2 + 0.012, z], variant % 3 === 0 ? materials.path : materials.grassDark, {
+        segments: 9 + (variant % 3),
+        castShadow: false,
+        receiveShadow: true,
+      });
+    });
+
+    const groveSites = [
+      [-449, 150, 1.18], [-421, 154, 1.04], [-372, 156, 1.14], [-341, 154, 1.02], [-292, 158, 1.12],
+      [-450, 223, 1.2], [-409, 225, 1.08], [-350, 224, 1.24], [-281, 226, 1.1], [-79, 333, 1.18],
+    ];
+    groveSites.forEach(([x, z, scale], index) => addTree(x, z, scale, 520 + index, "landscape"));
+
+    const shrubSites = [
+      [-440, 145], [-430, 160], [-405, 151], [-380, 162], [-356, 151], [-326, 161],
+      [-459, 216], [-443, 231], [-418, 218], [-398, 231], [-362, 219], [-337, 232],
+      [-301, 219], [-278, 232], [-227, 330], [-206, 341], [-96, 328], [-71, 341],
+    ];
+    shrubSites.forEach(([x, z], index) => {
+      const shrub = addCone(`rokko-underbrush-${index}`, "landscape", 0.62 + (index % 4) * 0.13, 0.9 + (index % 3) * 0.18, [x, 0.46, z], index % 3 === 0 ? materials.lime : materials.grassDark, {
+        segments: 6,
+        castShadow: false,
+      });
+      shrub.rotation.z = (index % 2 ? 1 : -1) * 0.08;
+    });
+
+    // Round-log edging and narrow stone drains visually separate the area bands without fencing players in.
+    const logEdges = [
+      [-447, 163, -430, 163], [-412, 164, -394, 164], [-376, 164, -358, 164],
+      [-340, 164, -322, 164], [-304, 164, -286, 164], [-456, 232, -438, 232],
+      [-421, 233, -403, 233], [-384, 233, -366, 233], [-347, 233, -329, 233],
+      [-310, 233, -292, 233], [-230, 344, -212, 344], [-93, 345, -74, 345],
+    ];
+    logEdges.forEach(([fromX, fromZ, toX, toZ], index) => addBeamBetween(
+      `rokko-log-edge-${index}`,
+      "landscape",
+      [fromX, 0.34, fromZ],
+      [toX, 0.34, toZ],
+      0.24,
+      index % 3 === 0 ? materials.darkWood : materials.wood,
+      { segments: 8, castShadow: index < 3 },
+    ));
+    [151, 226, 337].forEach((z, row) => {
+      addBox(`rokko-drain-west-${row}`, "landscape", [75, 0.045, 0.52], [-391, 0.035, z + 7], materials.stone, { castShadow: false });
+      addBox(`rokko-drain-east-${row}`, "landscape", [54, 0.045, 0.52], [-263, 0.035, z + 7], materials.stone, { castShadow: false });
+    });
   }
 
   function addZonePortal(area, x, z, rotationY = Math.PI) {
@@ -1106,24 +1586,39 @@
     const explicitTemplate = {
       ki01: "castle-net-gate", ki02: "small-flag-fort", ki03: "castle-slope", ki04: "dual-bouldering-wall",
       ki05: "traverse-castle-wall", ki07: "two-storey-treehouse", ki08: "sky-spiral-stairs", ki09: "three-swords",
-      ki10: "progressive-rope-weights", ki11: "magic-ball-maze", ki17: "jump-touch-panels",
+      ki06: "castle-escape-slide", ki13: "swinging-ring-road", ki14: "suspended-iron-bar", ki15: "triangular-net-dungeon",
+      ki16: "transparent-floating-walls", ki21: "multi-height-chimney-wall", ki23: "healing-timber-swing",
+      ki24: "twin-net-tunnels", ki26: "double-trapeze-jump",
+      ki10: "progressive-rope-weights", ki11: "magic-ball-maze", ki12: "suspended-zigzag-road", ki17: "jump-touch-panels",
       ki18: "punch-sandbag", ki31: "gong-log-finale",
-      ki19: "rope-labyrinth", ki20: "thunder-wire", ki22: "fortune-basketball", ki27: "wall-kick-corridor", ki29: "tightrope",
+      ki19: "rope-labyrinth", ki20: "thunder-wire", ki22: "fortune-basketball", ki25: "low-hero-zigzag-path",
+      ki27: "wall-kick-corridor", ki28: "rocking-balance-road", ki29: "sideways-rope-traverse",
       ch02: "mini-hydraulic-excavator", ch03: "triangle-net-tunnel", ch04: "mini-bouldering-wall", ch05: "wave-balance", ch06: "ladder-hammer",
       ch07: "ring-toss", ch10: "suspended-ox-crossing", ch11: "static-shape-steps",
       ya01: "long-monkey-bars", ya02: "multiple-seesaws", ya03: "hanging-board",
+      ya04: "sloth-parallel-logs", ya06: "super-ring-canopy", ya14: "wall-kick-tower", ya15: "twin-giant-slide",
+      ya16: "timber-wave-course", ya17: "dual-warped-walls", ya18: "double-ball-slider", ya19: "pachinko-shooter",
+      ya21: "twelve-panel-soccer", ya22: "nine-panel-pitching", ya27: "timber-mole-tunnel",
       ya05: "three-walls", ya07: "rotating-barrels", ya09: "jump-net", ya10: "polygon-antlion-bowl",
       ya11: "dense-pole-climb", ya12: "brick-heist-wall", ya13: "cooperative-sail-hoist", ya20: "frisbee-shooter",
       ya23: "log-wall-traverse", ya24: "cup-drop-tower", ya25: "parallel-wall-bridge", ya26: "fishing-lift",
       ya28: "ball-maze", ya29: "bank-bowling",
+      wa01: "transparent-spider-corridor", wa02: "single-balance-log", wa03: "infinite-hanging-rings",
+      wa04: "long-water-monkey-bars", wa05: "triple-hammock-gates", wa07: "twin-ninja-pull-boards",
+      wa11: "three-choice-parallel-logs", wa13: "eight-padded-floating-islands", wa15: "double-pulley-ball-slider",
+      wa18: "one-point-two-sumo-stage", wa20: "dual-difficulty-jump-islands", wa21: "direct-hang-sloth-log",
+      wa24: "dual-height-water-tightropes", wa29: "basket-net-swings", wa30: "exact-76x52-timber-frames",
+      wa33: "rope-to-catch-net",
       wa06: "hill-logs", wa08: "zigzag-logs", wa09: "net-wall", wa10: "pull-raft", wa12: "log-swings",
       wa14: "suspension-bridge", wa16: "three-second-wall", wa17: "sinking-raft", wa19: "web-hill",
       wa22: "overhang-wall", wa23: "long-log-raft", wa25: "water-slide", wa26: "suspended-log-disks",
       wa27: "rope-jungle", wa28: "cling-log-wall", wa31: "barrel-boat", wa32: "water-dash", wa34: "super-jump-lanes",
       de01: "steep-rope-ramp", de02: "spiral-stairs", de04: "rotating-balls", de05: "rope-forest",
+      de03: "suspended-grip-balls", de10: "rugged-timber-mountain", de14: "rescue-rope-training", de19: "inclined-pipe-traverse",
       de06: "hanging-stilts", de07: "hanging-stairs", de08: "hanging-platforms", de11: "climbing-fort",
       de12: "rotating-handles", de13: "swinging-log-bridge", de15: "finger-ledge", de16: "lift-logs",
       de17: "irregular-rings", de18: "flying-log", de20: "resistance-bell",
+      ch01: "mini-monkey-bars", ch08: "mini-ball-throw-target", ch09: "small-timber-playhouse", ch12: "mini-wire-slider",
     }[attraction.officialId];
     if (explicitTemplate) return explicitTemplate;
     const name = attraction.name;
@@ -1238,18 +1733,28 @@
       [-0.42, -0.34, 0.11, 0.4], [-0.42, 0.34, 0.11, 0.4], [0, 0, 0.5, 0.11],
     ];
     const markerZ = point.z - 4.25;
-    tagOfficialMesh(addBox(`${representation.officialId}-number-back`, "official-marker", [2.8, 2.1, 0.2], [point.x, point.surfaceY + 1.45, markerZ], materials.navy), representation);
+    queueOfficialStaticPrimitive(representation, {
+      name: `${representation.officialId}-number-back`,
+      role: "official-marker",
+      type: "box",
+      material: materials.navy,
+      position: [point.x, point.surfaceY + 1.45, markerZ],
+      scale: [2.8, 2.1, 0.2],
+      componentType: "official-number-backing",
+    });
     const digits = String(representation.number).padStart(2, "0");
     digits.split("").forEach((digit, digitIndex) => {
       for (const segmentIndex of patterns[digit]) {
         const [offsetX, offsetY, width, height] = segments[segmentIndex];
-        tagOfficialMesh(addBox(
-          `${representation.officialId}-digit-${digitIndex}-${segmentIndex}`,
-          "official-marker",
-          [width, height, 0.09],
-          [point.x - 0.62 + digitIndex * 1.24 + offsetX, point.surfaceY + 1.45 + offsetY, markerZ - 0.13],
+        queueOfficialStaticPrimitive(representation, {
+          name: `${representation.officialId}-digit-${digitIndex}-${segmentIndex}`,
+          role: "official-marker",
+          type: "box",
           material,
-        ), representation);
+          position: [point.x - 0.62 + digitIndex * 1.24 + offsetX, point.surfaceY + 1.45 + offsetY, markerZ - 0.13],
+          scale: [width, height, 0.09],
+          componentType: "official-number-segment",
+        });
       }
     });
   }
@@ -1293,7 +1798,7 @@
       attraction, template, representation, index, at, point, baseY, yaw, px, pz, ux, uz,
       primary, secondary, palette, box, playable, beam, cylinder, sphere, torus,
     } = context;
-    const rope = materials.white;
+    const rope = materials.whiteRope;
     const wood = materials.lightWood;
     const createFlexibleNetRig = (suffix, options = {}) => {
       const origin = options.origin || at(0.52, 0, 0);
@@ -1798,7 +2303,7 @@
       attraction, template, representation, index, previous, at, point, baseY, yaw, px, pz, ux, uz, length,
       primary, secondary, palette, box, playable, beam, cylinder, sphere, torus,
     } = context;
-    const whiteRope = materials.white;
+    const whiteRope = materials.whiteRope;
     const rideInteraction = (suffix, label, start, end, durationMs, movingObject = null, trolleyOffsetY = 1.2, sagAmount = 0.12) => {
       representation.interactive = true;
       registerInteraction({
@@ -1850,6 +2355,7 @@
           areaId: attraction.areaId,
           dynamic: options.dynamic,
           object: options.object,
+          heightAt: options.heightAt,
           contains(x, z) {
             const dx = x - surface.x;
             const dz = z - surface.z;
@@ -1860,9 +2366,1161 @@
           },
         },
       );
+      if (
+        options.followObjectPlane
+        && options.object?.worldToLocal
+        && options.object?.localToWorld
+      ) {
+        options.object.updateWorldMatrix?.(true, false);
+        const localPlanePoint = options.object.worldToLocal(
+          new constructors.Vector3(center.x, y, center.z),
+        );
+        const localNormalPoint = localPlanePoint.clone();
+        localNormalPoint.y += 1;
+        surface.heightAt = (x, z) => {
+          options.object.updateWorldMatrix?.(true, false);
+          const planePoint = options.object.localToWorld(localPlanePoint.clone());
+          const normalPoint = options.object.localToWorld(localNormalPoint.clone());
+          const normalX = normalPoint.x - planePoint.x;
+          const normalY = normalPoint.y - planePoint.y;
+          const normalZ = normalPoint.z - planePoint.z;
+          if (Math.abs(normalY) < 0.08) return surface.y;
+          return planePoint.y - (
+            normalX * (x - planePoint.x) + normalZ * (z - planePoint.z)
+          ) / normalY;
+        };
+      }
       return surface;
     };
 
+    if (template === "suspended-grip-balls") {
+      for (const amount of [0.08, 0.96]) {
+        for (const lateral of [-2.15, 2.15]) {
+          beam(`grip-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.2), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`grip-frame-brace-${amount}-${lateral}`, at(amount, lateral, 0.2), at(amount + (amount < 0.5 ? 0.1 : -0.1), lateral, 4.62), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`grip-frame-crossbar-${amount}`, at(amount, -2.38, 4.92), at(amount, 2.38, 4.92), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-0.78, 0.78]) {
+        beam(`grip-overhead-rail-${lateral}`, at(0.06, lateral, 4.82), at(0.98, lateral, 4.82), 0.24, materials.darkWood, { segments: 14, castShadow: true });
+        for (let grip = 0; grip < 7; grip += 1) {
+          const amount = 0.15 + grip * 0.125;
+          const anchor = at(amount, lateral, 4.62);
+          const ball = at(amount, lateral, 3.62 + (grip % 2) * 0.08);
+          box(`grip-anchor-plate-${lateral}-${grip}`, [0.38, 0.14, 0.52], anchor, materials.steel, { rotationY: yaw, castShadow: true });
+          beam(`grip-metal-stem-${lateral}-${grip}`, anchor, ball, 0.085, materials.steel, { segments: 10, castShadow: true });
+          sphere(`grip-polished-ball-${lateral}-${grip}`, 0.33, ball, materials.steel, { segments: 16, castShadow: true });
+        }
+      }
+      playable("grip-start-pad", [4.8, 0.3, 1.8], { ...at(0.06, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      playable("grip-finish-pad", [4.8, 0.3, 1.8], { ...at(0.98, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("assisted-traverse", "握力の限界を超えて：Eで球体をつかむ", at(0.1, -0.78, 2.72), at(0.95, -0.78, 2.72), 5_800, null, 0.9, 0.16);
+      representation.publishedGripBallCount = 14;
+      representation.detailProfile = "official-photo-matched-double-timber-overhead-frame-fourteen-short-steel-stems-and-polished-spherical-grips-with-low-course-pads";
+      return true;
+    }
+    if (template === "rugged-timber-mountain") {
+      const rampBottom = at(0.15, 0, 0.04);
+      const rampTop = at(0.83, 0, 5.95);
+      tagOfficialMesh(addRamp(`${attraction.officialId}-rugged-main-slope`, "official-attraction", [rampBottom.x, rampBottom.y, rampBottom.z], [rampTop.x, rampTop.y, rampTop.z], 5.6, materials.darkWood, { areaId: attraction.areaId }), representation);
+      const run = Math.hypot(rampTop.x - rampBottom.x, rampTop.z - rampBottom.z);
+      const pitch = -Math.atan2(rampTop.y - rampBottom.y, run);
+      for (let panel = 0; panel < 8; panel += 1) {
+        const amount = 0.19 + panel * 0.078;
+        const height = 0.36 + panel * 0.69;
+        box(`rugged-face-panel-${panel}`, [5.45, 0.12, 1.28], at(amount, 0, height), panel % 2 ? materials.darkWood : materials.wood, { rotationX: pitch, rotationY: yaw, castShadow: true });
+      }
+      const holds = [
+        [0.22, -1.65, 0.68, 1.4, 0.62], [0.34, 1.28, 1.72, 1.25, 0.72], [0.48, -0.72, 2.75, 1.6, 0.58],
+        [0.62, 1.55, 3.82, 1.22, 0.7], [0.76, -1.35, 4.9, 1.48, 0.6],
+      ];
+      holds.forEach(([amount, lateral, height, width, depth], holdIndex) => {
+        const location = at(amount, lateral, height);
+        box(`rugged-angular-ledge-${holdIndex}`, [width, 0.58, depth], { ...location, y: location.y + 0.16 }, holdIndex % 2 ? materials.wood : materials.lightWood, { rotationX: pitch * 0.2, rotationY: yaw, castShadow: true });
+        for (const side of [-1, 1]) sphere(`rugged-ledge-bolt-${holdIndex}-${side}`, 0.075, { x: location.x + px * side * width * 0.3, y: location.y + 0.48, z: location.z + pz * side * width * 0.3 }, materials.steel, { segments: 9, castShadow: true });
+      });
+      for (const side of [-1, 1]) {
+        box(`rugged-triangular-side-${side}`, [0.24, 5.9, 7.2], at(0.5, side * 2.82, 2.9), materials.wood, { rotationY: yaw, castShadow: true });
+        beam(`rugged-top-rail-${side}`, at(0.75, side * 2.82, 5.65), at(0.96, side * 2.82, 6.05), 0.18, materials.lightWood, { segments: 10, castShadow: true });
+      }
+      for (let board = 0; board < 6; board += 1) box(`rugged-side-board-${board}`, [0.18, 0.52, 1.25], at(0.22 + board * 0.11, 2.96, 0.55 + board * 0.92), materials.darkWood, { rotationY: yaw, castShadow: true });
+      playable("rugged-summit", [5.8, 0.32, 2.2], { ...at(0.87, 0, 6), y: at(0.87, 0, 6).y + 0.16 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("rugged-climb", "ゴツゴツ山を越えて：Eで岩肌を登る", { ...rampBottom, y: rampBottom.y + PLAYER_FOOT_OFFSET }, { ...rampTop, y: rampTop.y + PLAYER_FOOT_OFFSET }, 4_200, null, 1.2, 0.06);
+      representation.publishedAngularLedgeCount = holds.length;
+      representation.detailProfile = "official-photo-matched-dark-brown-steep-wedge-mountain-five-large-staggered-angular-timber-ledges-paneled-face-and-timber-side-shell";
+      return true;
+    }
+    if (template === "rescue-rope-training") {
+      for (const amount of [0.07, 0.98]) {
+        for (const lateral of [-2.45, 2.45]) {
+          beam(`rescue-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.65), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`rescue-brace-${amount}-${lateral}`, at(amount, lateral, 0.2), at(amount + (amount < 0.5 ? 0.1 : -0.1), lateral, 4.15), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`rescue-crossbar-${amount}`, at(amount, -2.72, 4.42), at(amount, 2.72, 4.42), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-0.82, 0.82]) {
+        for (const height of [1.15, 2.55]) {
+          beam(`rescue-main-rope-${lateral}-${height}`, at(0.07, lateral, height), at(0.98, lateral, height), 0.105, whiteRope, { segments: 18, castShadow: true });
+          for (const amount of [0.1, 0.32, 0.54, 0.76, 0.95]) torus(`rescue-rope-marker-${lateral}-${height}-${amount}`, 0.14, 0.035, at(amount, lateral, height), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 10, castShadow: true });
+        }
+      }
+      for (const lateral of [-0.82, 0.82]) for (const amount of [0.08, 0.98]) beam(`rescue-tie-${lateral}-${amount}`, at(amount, lateral, 1.08), at(amount, lateral, 4.38), 0.055, whiteRope, { segments: 10, castShadow: true });
+      playable("rescue-start-pad", [5.6, 0.3, 1.7], { ...at(0.05, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      playable("rescue-finish-pad", [5.6, 0.3, 1.7], { ...at(0.99, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("assisted-traverse", "スーパー救助訓練：Eでロープ渡過", at(0.08, -0.82, 1.38), at(0.97, -0.82, 1.38), 6_400, null, 0.2, 0.28);
+      representation.publishedParallelRopeCount = 4;
+      representation.detailProfile = "official-photo-and-description-matched-double-lane-rescue-rope-traverse-with-upper-hand-lines-lower-body-lines-timber-frames-and-visible-tension-ties";
+      return true;
+    }
+    if (template === "inclined-pipe-traverse") {
+      for (const amount of [0.08, 0.96]) {
+        for (const lateral of [-2.1, 2.1]) {
+          beam(`pipe-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.25), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`pipe-frame-brace-${amount}-${lateral}`, at(amount, lateral, 0.15), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 4.7), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`pipe-frame-crossbar-${amount}`, at(amount, -2.38, 5.02), at(amount, 2.38, 5.02), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      const pipeStart = at(0.12, 0, 2.05);
+      const pipeEnd = at(0.94, 0, 4.62);
+      beam("inclined-steel-pipe", pipeStart, pipeEnd, 0.23, materials.steel, { segments: 20, castShadow: true });
+      for (let clampIndex = 0; clampIndex < 10; clampIndex += 1) {
+        const amount = 0.13 + clampIndex * 0.088;
+        const height = lerp(2.08, 4.57, clampIndex / 9);
+        torus(`pipe-collar-${clampIndex}`, 0.245, 0.038, at(amount, 0, height), materials.darkWood, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+        sphere(`pipe-collar-bolt-${clampIndex}`, 0.065, at(amount, -0.26, height), materials.steel, { segments: 9, castShadow: true });
+      }
+      for (const amount of [0.13, 0.93]) for (const lateral of [-0.55, 0.55]) beam(`pipe-hanger-${amount}-${lateral}`, at(amount, lateral, amount < 0.5 ? 2.1 : 4.55), at(amount, lateral, 4.92), 0.07, materials.steel, { segments: 10, castShadow: true });
+      playable("pipe-start-pad", [4.8, 0.3, 1.8], { ...at(0.07, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      playable("pipe-finish-pad", [4.8, 0.3, 1.8], { ...at(0.98, 0, 0), y: baseY + 0.15 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("assisted-traverse", "斜めパイプをつたって：Eで握って進む", at(0.12, 0, 1.05), at(0.94, 0, 3.6), 5_400, null, 0.9, 0.14);
+      representation.publishedPipeIncline = "low-to-high-single-smooth-pipe";
+      representation.detailProfile = "official-photo-matched-single-smooth-inclined-metal-pipe-suspended-inside-heavy-timber-portal-frames-with-collars-hangers-and-low-platforms";
+      return true;
+    }
+    if (template === "mini-monkey-bars") {
+      for (const amount of [0.08, 0.96]) {
+        for (const lateral of [-1.72, 1.72]) {
+          beam(`mini-monkey-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 3.08), 0.24, materials.wood, { segments: 12, castShadow: true });
+          beam(`mini-monkey-a-brace-${amount}-${lateral}`, at(amount, lateral * 1.42, 0), at(amount, lateral, 2.82), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`mini-monkey-end-cross-${amount}`, at(amount, -1.94, 2.92), at(amount, 1.94, 2.92), 0.22, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-0.96, 0.96]) beam(`mini-monkey-side-log-${lateral}`, at(0.07, lateral, 2.84), at(0.97, lateral, 2.84), 0.23, materials.wood, { segments: 14, castShadow: true });
+      for (let rung = 0; rung < 10; rung += 1) {
+        const amount = 0.12 + rung * 0.092;
+        beam(`mini-monkey-steel-rung-${rung}`, at(amount, -0.96, 2.73), at(amount, 0.96, 2.73), 0.095, materials.steel, { segments: 12, castShadow: true });
+        for (const lateral of [-0.96, 0.96]) box(`mini-monkey-rung-bracket-${rung}-${lateral}`, [0.25, 0.28, 0.2], at(amount, lateral, 2.76), materials.steel, { rotationY: yaw, castShadow: true });
+      }
+      playable("mini-monkey-start-pad", [3.8, 0.28, 1.45], { ...at(0.06, 0, 0), y: baseY + 0.14 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      playable("mini-monkey-finish-pad", [3.8, 0.28, 1.45], { ...at(0.98, 0, 0), y: baseY + 0.14 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("assisted-traverse", "ミニうんてい：Eで最後まで渡る", at(0.09, 0, 1.72), at(0.96, 0, 1.72), 4_800, null, 0.9, 0.12);
+      representation.publishedRungCount = 10;
+      representation.detailProfile = "official-2026-photo-matched-child-height-ten-steel-rung-monkey-bars-between-round-timber-side-logs-with-wide-a-frame-bracing";
+      return true;
+    }
+    if (template === "mini-ball-throw-target") {
+      const board = at(0.72, 0, 0);
+      const panelSpecs = [
+        [-3.25, 4.65, 0.55, 6.5], [3.25, 4.65, 0.55, 6.5], [0, 4.65, 6, 0.55], [0, 0.3, 6, 0.6],
+        [-2.05, 2.7, 1.2, 3.35], [2.05, 2.82, 1.2, 3.6], [0, 1.45, 1.65, 0.48], [0, 3.72, 1.8, 0.5],
+        [-1.75, 1.02, 1.1, 0.48], [1.72, 1.1, 1.25, 0.5], [0, 2.42, 0.55, 0.72],
+      ];
+      panelSpecs.forEach(([lateral, height, width, panelHeight], panelIndex) => {
+        box(`target-board-panel-${panelIndex}`, [width, panelHeight, 0.42], { x: board.x + px * lateral, y: baseY + height, z: board.z + pz * lateral }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      });
+      const targetHoles = [
+        { lateral: 0, height: 3.28, radius: 1.12 },
+        { lateral: -1.72, height: 1.55, radius: 0.82 },
+        { lateral: 1.72, height: 1.65, radius: 0.62 },
+      ];
+      targetHoles.forEach((hole, holeIndex) => {
+        const center = { x: board.x - ux * 0.25 + px * hole.lateral, y: baseY + hole.height, z: board.z - uz * 0.25 + pz * hole.lateral };
+        torus(`target-hole-rim-${holeIndex}`, hole.radius, 0.12, center, materials.lightWood, { rotationY: yaw, segments: 24, castShadow: true });
+        for (let bolt = 0; bolt < 6; bolt += 1) {
+          const angle = bolt / 6 * Math.PI * 2;
+          sphere(`target-rim-bolt-${holeIndex}-${bolt}`, 0.055, { x: center.x + px * Math.cos(angle) * hole.radius, y: center.y + Math.sin(angle) * hole.radius, z: center.z + pz * Math.cos(angle) * hole.radius }, materials.steel, { segments: 8, castShadow: true });
+        }
+      });
+      playable("target-ball-trough", [6.6, 0.25, 1.15], { ...at(0.45, 0, 0.12), y: baseY + 0.12 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      const projectiles = [];
+      for (let ballIndex = 0; ballIndex < 3; ballIndex += 1) {
+        const location = at(0.4, (ballIndex - 1) * 0.78, 0.62);
+        const ball = sphere(`target-throw-ball-${ballIndex}`, 0.35, location, palette[(ballIndex + 1) % palette.length], { segments: 14, castShadow: true });
+        projectiles.push({ ball, location });
+      }
+      representation.interactive = true;
+      registerInteraction({
+        id: `official-${attraction.officialId}-target`, label: "ボール投げチャレンジ：3球を大きい穴から狙う", point: at(0.38, 0, 0.8), radius: 4.2, areaId: attraction.areaId,
+        activate() { representation.targetActivatedAt = performance.now(); playTone(420, 0.08, "square"); return true; },
+      });
+      addAnimation((_seconds, now) => {
+        if (!representation.targetActivatedAt) return;
+        const elapsed = now - representation.targetActivatedAt;
+        projectiles.forEach(({ ball, location }, ballIndex) => {
+          const progress = clamp((elapsed - ballIndex * 220) / 820, 0, 1);
+          const hole = targetHoles[ballIndex];
+          const target = { x: board.x - ux * 0.5 + px * hole.lateral, y: baseY + hole.height, z: board.z - uz * 0.5 + pz * hole.lateral };
+          ball.position.set(lerp(location.x, target.x, progress), lerp(location.y, target.y, progress) + Math.sin(progress * Math.PI) * 1.8, lerp(location.z, target.z, progress));
+        });
+      });
+      representation.publishedThrowCount = 3;
+      representation.detailProfile = "official-2026-photo-matched-dark-timber-rectangular-target-wall-with-one-large-upper-hole-two-progressively-smaller-lower-holes-ball-trough-and-three-animated-balls";
+      return true;
+    }
+    if (template === "small-timber-playhouse") {
+      const center = at(0.58, 0, 0);
+      playable("playhouse-floor", [6.4, 0.34, 6.2], { x: center.x, y: baseY + 0.22, z: center.z }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      for (const lateral of [-2.85, 2.85]) for (const along of [-2.65, 2.65]) box(`playhouse-corner-post-${lateral}-${along}`, [0.34, 4.65, 0.34], { x: center.x + px * lateral + ux * along, y: baseY + 2.5, z: center.z + pz * lateral + uz * along }, materials.wood, { rotationY: yaw, castShadow: true });
+      for (const lateral of [-2.7, 2.7]) {
+        for (let panel = 0; panel < 5; panel += 1) box(`playhouse-side-panel-${lateral}-${panel}`, [0.34, 0.78, 5.3], { x: center.x + px * lateral, y: baseY + 0.85 + panel * 0.78, z: center.z + pz * lateral }, panel % 2 ? materials.darkWood : materials.wood, { rotationY: yaw, castShadow: true });
+      }
+      for (const side of [-1, 1]) {
+        box(`playhouse-front-door-jamb-${side}`, [1.72, 3.25, 0.34], { x: center.x + px * side * 1.92 - ux * 2.68, y: baseY + 1.9, z: center.z + pz * side * 1.92 - uz * 2.68 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+        box(`playhouse-rear-window-side-${side}`, [1.38, 2.1, 0.34], { x: center.x + px * side * 2.02 + ux * 2.68, y: baseY + 2.7, z: center.z + pz * side * 2.02 + uz * 2.68 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      }
+      box("playhouse-front-header", [5.7, 1.15, 0.34], { x: center.x - ux * 2.68, y: baseY + 4.25, z: center.z - uz * 2.68 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      box("playhouse-rear-window-sill", [5.7, 1.1, 0.34], { x: center.x + ux * 2.68, y: baseY + 0.82, z: center.z + uz * 2.68 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      box("playhouse-rear-window-header", [5.7, 1.25, 0.34], { x: center.x + ux * 2.68, y: baseY + 4.32, z: center.z + uz * 2.68 }, materials.darkWood, { rotationY: yaw, castShadow: true });
+      for (const side of [-1, 1]) for (let roofPanel = 0; roofPanel < 6; roofPanel += 1) {
+        const along = -2.5 + roofPanel;
+        box(`playhouse-roof-sheet-${side}-${roofPanel}`, [3.65, 0.18, 0.92], { x: center.x + px * side * 1.45 + ux * along, y: baseY + 5.28 - Math.abs(1.45) * 0.2, z: center.z + pz * side * 1.45 + uz * along }, materials.steel, { rotationY: yaw, rotationZ: side * -0.48, castShadow: true });
+      }
+      beam("playhouse-roof-ridge", { x: center.x - ux * 2.9, y: baseY + 5.72, z: center.z - uz * 2.9 }, { x: center.x + ux * 2.9, y: baseY + 5.72, z: center.z + uz * 2.9 }, 0.09, materials.steel, { segments: 12, castShadow: true });
+      playable("playhouse-window-shelf", [3.4, 0.22, 0.65], { x: center.x + ux * 2.35, y: baseY + 1.48, z: center.z + uz * 2.35 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("playhouse", "小さな小屋：Eで中に入って窓から手を振る", { x: center.x - ux * 3.4, y: baseY + PLAYER_FOOT_OFFSET, z: center.z - uz * 3.4 }, { x: center.x, y: baseY + PLAYER_FOOT_OFFSET, z: center.z }, 1_500, null, 1.2, 0.02);
+      representation.detailProfile = "official-2026-photo-matched-dark-stained-small-timber-hut-open-child-door-window-shelf-paneled-walls-and-overlapping-gray-gabled-metal-roof";
+      return true;
+    }
+    if (template === "mini-wire-slider") {
+      const start = at(0.08, 0, 2.55);
+      const end = at(0.98, 0, 1.1);
+      for (const amount of [0.04, 1.01]) {
+        for (const lateral of [-2.05, 2.05]) {
+          beam(`slider-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, amount < 0.5 ? 6.15 : 4.65), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`slider-frame-brace-${amount}-${lateral}`, at(amount, lateral * 1.5, 0), at(amount, lateral, amount < 0.5 ? 5.62 : 4.12), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`slider-frame-crossbar-${amount}`, at(amount, -2.35, amount < 0.5 ? 5.9 : 4.4), at(amount, 2.35, amount < 0.5 ? 5.9 : 4.4), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("slider-overhead-wire", at(0.03, 0, 6), at(1.02, 0, 4.52), 0.075, materials.steel, { segments: 20, castShadow: true });
+      playable("slider-launch-deck", [5.2, 0.34, 2.25], { ...at(0.04, 0, 1.15), y: at(0.04, 0, 1.15).y + 0.17 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      for (const side of [-1, 1]) beam(`slider-launch-rail-${side}`, at(0.01, side * 2.25, 1.25), at(0.12, side * 2.25, 2.55), 0.12, materials.wood, { segments: 10, castShadow: true });
+      const basketGroup = new constructors.Group();
+      basketGroup.name = `Greenia:${attraction.officialId}-wire-basket`;
+      basketGroup.position.set(start.x, start.y, start.z);
+      basketGroup.rotation.y = yaw;
+      root.add(basketGroup);
+      const trolley = cylinder("slider-trolley-wheel", 0.32, 0.42, { x: 0, y: 3.15, z: 0 }, materials.orange, { rotationZ: Math.PI / 2, segments: 16, parent: basketGroup, castShadow: true });
+      for (const side of [-1, 1]) {
+        torus(`slider-trolley-side-wheel-${side}`, 0.34, 0.09, { x: side * 0.27, y: 3.15, z: 0 }, materials.orange, { rotationY: Math.PI / 2, segments: 14, parent: basketGroup, castShadow: true });
+        beam(`slider-chain-front-${side}`, { x: side * 0.62, y: 2.92, z: -0.48 }, { x: side * 0.92, y: 0.35, z: -0.72 }, 0.055, materials.steel, { segments: 10, parent: basketGroup, castShadow: true });
+        beam(`slider-chain-rear-${side}`, { x: side * 0.62, y: 2.92, z: 0.48 }, { x: side * 0.92, y: 0.35, z: 0.72 }, 0.055, materials.steel, { segments: 10, parent: basketGroup, castShadow: true });
+        beam(`slider-white-handle-${side}`, { x: side * 0.62, y: 2.45, z: 0 }, { x: side * 0.92, y: 0.7, z: 0 }, 0.085, whiteRope, { segments: 12, parent: basketGroup, castShadow: true });
+      }
+      const basketSeat = playable("slider-basket-seat", [2.15, 0.28, 1.55], { x: 0, y: 0.12, z: 0 }, materials.lightWood, { parent: basketGroup, dynamic: true, castShadow: true });
+      for (let slat = 0; slat < 7; slat += 1) box(`slider-basket-slat-${slat}`, [2.05, 0.15, 0.14], { x: 0, y: 0.36 + (slat % 2) * 0.03, z: -0.66 + slat * 0.22 }, slat % 2 ? materials.wood : materials.lightWood, { parent: basketGroup, castShadow: true });
+      for (const side of [-1, 1]) for (let knot = 0; knot < 4; knot += 1) sphere(`slider-rope-knot-${side}-${knot}`, 0.11, { x: side * 0.9, y: 0.62 + knot * 0.56, z: 0 }, whiteRope, { segments: 9, parent: basketGroup, castShadow: true });
+      beam("slider-end-buffer", at(0.91, -0.9, 3.95), at(0.91, 0.9, 3.95), 0.2, materials.orange, { segments: 12, castShadow: true });
+      playable("slider-landing-pad", [5.4, 0.28, 2.8], { ...at(1, 0, 0), y: baseY + 0.14 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("mini-slider", "ミニスライダー：Eでカゴに乗る", start, end, 4_200, basketGroup, 0.2, 0.08);
+      basketSeat.surface.object = basketGroup;
+      basketSeat.surface.dynamic = true;
+      representation.publishedLengthMeters = 10;
+      representation.detailProfile = "official-2026-photo-and-description-matched-ten-meter-sloping-overhead-wire-slider-with-orange-trolley-chain-and-white-rope-suspended-slat-basket-launch-frame-and-landing-buffer";
+      return true;
+    }
+
+    if (template === "sloth-parallel-logs") {
+      for (const amount of [0.1, 0.92]) {
+        for (const lateral of [-1.45, 1.45]) {
+          beam(`sloth-support-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 3.85), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`sloth-support-brace-${amount}-${lateral}`, at(amount, lateral, 0.45), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 3.45), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`sloth-end-cross-log-${amount}`, at(amount, -1.72, 3.75), at(amount, 1.72, 3.75), 0.27, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-0.72, 0.72]) {
+        beam(`sloth-long-overhead-log-${lateral}`, at(0.09, lateral, 3.72), at(0.94, lateral, 3.72), 0.32, materials.wood, { segments: 14, castShadow: true });
+        orientedSurface(`${attraction.officialId}-sloth-log-top-${lateral}`, at(0.51, lateral, 4.03), 0.62, length * 0.8, 4.03);
+        for (const amount of [0.13, 0.29, 0.45, 0.61, 0.77, 0.91]) {
+          torus(`sloth-log-collar-${lateral}-${amount}`, 0.34, 0.045, at(amount, lateral, 3.72), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+          sphere(`sloth-collar-bolt-${lateral}-${amount}`, 0.065, at(amount, lateral - 0.33, 3.72), materials.steel, { segments: 9, castShadow: true });
+        }
+      }
+      rideInteraction("assisted-traverse", "ナマケモノの気分：Eで逆さにぶら下がる", at(0.1, -0.72, 3.12), at(0.93, -0.72, 3.12), 5_600, null, 0.52, 0.2);
+      representation.publishedParallelLogCount = 2;
+      representation.detailProfile = "official-photo-and-description-matched-two-clean-parallel-overhead-round-logs-low-four-post-frame-steel-collars-and-upside-down-sloth-traverse";
+      return true;
+    }
+    if (template === "super-ring-canopy") {
+      for (const amount of [0.07, 0.95]) {
+        for (const lateral of [-2.9, 2.9]) {
+          beam(`ring-canopy-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.45), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`ring-canopy-brace-${amount}-${lateral}`, at(amount, lateral, 0.55), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.9), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`ring-canopy-crossbar-${amount}`, at(amount, -3.12, 5.35), at(amount, 3.12, 5.35), 0.27, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-1.85, 0, 1.85]) beam(`ring-canopy-top-rail-${lateral}`, at(0.07, lateral, 5.28), at(0.95, lateral, 5.28), 0.22, materials.wood, { segments: 12, castShadow: true });
+      const ringCount = 18;
+      for (let ringIndex = 0; ringIndex < ringCount; ringIndex += 1) {
+        const row = Math.floor(ringIndex / 6);
+        const column = ringIndex % 6;
+        const amount = 0.15 + column * 0.145;
+        const lateral = (row - 1) * 1.55 + (column % 2 ? 0.22 : -0.22);
+        const center = at(amount, lateral, 3.18 + (column % 3) * 0.12);
+        beam(`ring-canopy-white-hanger-${ringIndex}`, { ...center, y: center.y + 0.78 }, at(amount, lateral, 5.2), 0.06, whiteRope, { segments: 10, castShadow: true });
+        torus(`ring-canopy-black-ring-${ringIndex}`, 0.64, 0.12, center, materials.black, { rotationY: yaw + Math.PI / 2, segments: 18, castShadow: true });
+        sphere(`ring-canopy-lashing-${ringIndex}`, 0.11, { ...center, y: center.y + 0.84 }, whiteRope, { segments: 9, castShadow: true });
+      }
+      orientedSurface(`${attraction.officialId}-ring-canopy-grip-guide`, at(0.52, 0, 2.8), 4.7, length * 0.76, 2.72);
+      rideInteraction("assisted-traverse", "スーパー吊り輪祭り：Eで吊り輪を渡る", at(0.1, 0, 2.72), at(0.94, 0, 2.72), 7_200, null, 0.42, 0.28);
+      representation.publishedRingCount = ringCount;
+      representation.detailProfile = "official-photo-and-description-matched-dense-eighteen-black-transit-style-rings-three-staggered-rows-white-rope-hangers-and-heavy-log-canopy";
+      return true;
+    }
+    if (template === "wall-kick-tower") {
+      const towerCenter = at(0.58, 0, 3.15);
+      box("wall-kick-tower-left", [2.25, 6.3, 0.55], at(0.58, -2.25, 3.15), materials.darkWood, { rotationY: yaw, castShadow: true });
+      box("wall-kick-tower-right", [2.25, 6.3, 0.55], at(0.58, 2.25, 3.15), materials.darkWood, { rotationY: yaw, castShadow: true });
+      box("wall-kick-tower-back", [5.2, 6.3, 0.55], at(0.72, 0, 3.15), materials.darkWood, { rotationY: yaw, castShadow: true });
+      playable("wall-kick-upper-deck", [5.25, 0.38, 4.1], { ...towerCenter, y: baseY + 5.48 }, materials.lightWood, { rotationY: yaw, castShadow: true });
+      for (const lateral of [-2.55, 2.55]) {
+        beam(`wall-kick-ladder-rail-${lateral}`, at(0.39, lateral, 0.15), at(0.39, lateral, 5.2), 0.16, materials.wood, { segments: 10, castShadow: true });
+        for (let rung = 0; rung < 6; rung += 1) beam(`wall-kick-ladder-rung-${lateral}-${rung}`, at(0.39, lateral - 0.5, 0.55 + rung * 0.76), at(0.39, lateral + 0.5, 0.55 + rung * 0.76), 0.13, materials.darkWood, { segments: 10, castShadow: true });
+      }
+      for (let foothold = 0; foothold < 10; foothold += 1) {
+        const amount = 0.47 + foothold * 0.022;
+        const lateral = foothold % 2 ? 1.68 : -1.68;
+        playable(`wall-kick-inside-step-${foothold}`, [1.15, 0.25, 0.64], at(amount, lateral, 0.55 + foothold * 0.43), foothold % 2 ? materials.coral : materials.yellow, { rotationY: yaw, castShadow: true });
+        sphere(`wall-kick-step-bolt-${foothold}`, 0.07, at(amount - 0.01, lateral, 0.72 + foothold * 0.43), materials.steel, { segments: 9, castShadow: true });
+      }
+      for (const lateral of [-2.25, 0, 2.25]) beam(`wall-kick-top-rail-post-${lateral}`, at(0.58, lateral, 5.5), at(0.58, lateral, 7.05), 0.13, materials.wood, { segments: 10, castShadow: true });
+      beam("wall-kick-top-handline", at(0.58, -2.55, 6.95), at(0.58, 2.55, 6.95), 0.1, materials.white, { segments: 10, castShadow: true });
+      rideInteraction("tower-course", "スーパー壁キック：Eで駆け上がる", at(0.42, -1.68, 0.55), at(0.61, 0, 5.82), 7_600, null, 0.45, 0.12);
+      representation.publishedInsideStepCount = 10;
+      representation.detailProfile = "official-photo-and-description-matched-dark-open-core-timber-tower-alternating-wall-kick-steps-twin-log-ladders-upper-deck-rails-and-descent-line";
+      return true;
+    }
+    if (template === "twin-giant-slide") {
+      const segmentCount = 8;
+      for (const lane of [-1.42, 1.42]) {
+        for (let segment = 0; segment < segmentCount; segment += 1) {
+          const fromAmount = lerp(0.12, 0.92, segment / segmentCount);
+          const toAmount = lerp(0.12, 0.92, (segment + 1) / segmentCount);
+          const fromHeight = lerp(5.2, 0.22, segment / segmentCount);
+          const toHeight = lerp(5.2, 0.22, (segment + 1) / segmentCount);
+          const from = at(fromAmount, lane, fromHeight);
+          const to = at(toAmount, lane, toHeight);
+          const horizontal = Math.hypot(to.x - from.x, to.z - from.z);
+          const pitch = -Math.atan2(to.y - from.y, horizontal);
+          const center = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2, z: (from.z + to.z) / 2 };
+          playable(`giant-slide-steel-lane-${lane}-${segment}`, [2.55, 0.16, Math.hypot(horizontal, to.y - from.y) + 0.16], center, materials.steel, { rotationX: pitch, rotationY: yaw, castShadow: true });
+          for (const side of [-1, 1]) {
+            const edge = lane + side * 1.37;
+            box(`giant-slide-dark-fascia-${lane}-${segment}-${side}`, [0.2, 1.15, horizontal + 0.28], {
+              x: center.x + px * side * 1.37, y: center.y + 0.55, z: center.z + pz * side * 1.37,
+            }, materials.darkWood, { rotationX: pitch, rotationY: yaw, castShadow: true });
+            sphere(`giant-slide-rivet-${lane}-${segment}-${side}`, 0.065, at((fromAmount + toAmount) / 2, edge, (fromHeight + toHeight) / 2 + 0.7), materials.steel, { segments: 9, castShadow: true });
+          }
+        }
+      }
+      for (const lateral of [-2.95, 0, 2.95]) beam(`giant-slide-entry-post-${lateral}`, at(0.1, lateral, 0), at(0.1, lateral, 6.15), 0.23, materials.darkWood, { segments: 12, castShadow: true });
+      rideInteraction("giant-slide", "巨大滑り台：Eで2列同時に滑る", at(0.11, -1.42, 5.25), at(0.93, -1.42, 0.28), 3_900, null, 0.78, 0.04);
+      representation.publishedLaneCount = 2;
+      representation.publishedSlideSegmentCount = segmentCount * 2;
+      representation.detailProfile = "official-photo-and-description-matched-twin-wide-reflective-steel-slide-lanes-dark-high-side-fascias-central-divider-rivets-and-adult-sized-runout";
+      return true;
+    }
+    if (template === "timber-wave-course") {
+      const waveHeights = [0.25, 1.15, 2.55, 3.8, 2.25, 0.72, 1.75, 3.6, 4.65, 2.75, 0.9, 0.2];
+      for (let segment = 0; segment < waveHeights.length - 1; segment += 1) {
+        const fromAmount = lerp(0.09, 0.94, segment / (waveHeights.length - 1));
+        const toAmount = lerp(0.09, 0.94, (segment + 1) / (waveHeights.length - 1));
+        const from = at(fromAmount, 0, waveHeights[segment]);
+        const to = at(toAmount, 0, waveHeights[segment + 1]);
+        tagOfficialMesh(addRamp(`${attraction.officialId}-wave-deck-${segment}`, "official-attraction", [from.x, from.y, from.z], [to.x, to.y, to.z], 4.3, materials.darkWood, { areaId: attraction.areaId }), representation);
+        const centerAmount = (fromAmount + toAmount) / 2;
+        const centerHeight = (waveHeights[segment] + waveHeights[segment + 1]) / 2;
+        for (const side of [-1, 1]) {
+          box(`wave-side-fascia-${segment}-${side}`, [0.22, 1.05, length / (waveHeights.length - 1) + 0.16], at(centerAmount, side * 2.25, centerHeight + 0.38), materials.black, { rotationY: yaw, castShadow: true });
+          sphere(`wave-fascia-bolt-${segment}-${side}`, 0.07, at(centerAmount, side * 2.37, centerHeight + 0.58), materials.steel, { segments: 9, castShadow: true });
+        }
+        box(`wave-plank-seam-${segment}`, [4.05, 0.08, 0.12], at(toAmount, 0, waveHeights[segment + 1] + 0.07), materials.lightWood, { rotationY: yaw, castShadow: true });
+      }
+      rideInteraction("wave-course", "山あり谷あり：Eで登って下る", at(0.08, 0, 0.35), at(0.95, 0, 0.35), 7_000, null, 0.72, 0.08);
+      representation.publishedWaveSegmentCount = waveHeights.length - 1;
+      representation.detailProfile = "official-photo-and-description-matched-dark-timber-two-crest-wave-course-deep-central-valley-eleven-sloped-deck-panels-side-fascias-seams-and-bolts";
+      return true;
+    }
+    if (template === "dual-warped-walls") {
+      const lanes = [
+        { lateral: -2.05, height: 7.2, width: 3.45 },
+        { lateral: 2.05, height: 4.9, width: 3.15 },
+      ];
+      lanes.forEach((lane, laneIndex) => {
+        const curveSegments = 8;
+        for (let segment = 0; segment < curveSegments; segment += 1) {
+          const t0 = segment / curveSegments;
+          const t1 = (segment + 1) / curveSegments;
+          const from = at(0.2 + t0 * 0.45, lane.lateral, 0.12 + lane.height * t0 * t0);
+          const to = at(0.2 + t1 * 0.45, lane.lateral, 0.12 + lane.height * t1 * t1);
+          tagOfficialMesh(addRamp(`${attraction.officialId}-warped-lane-${laneIndex}-${segment}`, "official-attraction", [from.x, from.y, from.z], [to.x, to.y, to.z], lane.width, materials.camo, { areaId: attraction.areaId }), representation);
+          for (const side of [-1, 1]) box(`warped-side-panel-${laneIndex}-${segment}-${side}`, [0.2, 0.95, Math.max(0.7, length * 0.065)], at(0.225 + (t0 + t1) * 0.225, lane.lateral + side * lane.width / 2, 0.42 + lane.height * ((t0 + t1) / 2) ** 2), materials.darkWood, { rotationY: yaw, castShadow: true });
+        }
+        playable(`warped-top-deck-${laneIndex}`, [lane.width + 0.45, 0.38, 3.3], at(0.7, lane.lateral, lane.height), materials.darkWood, { rotationY: yaw, castShadow: true });
+        for (const side of [-1, 1]) beam(`warped-top-rail-${laneIndex}-${side}`, at(0.67, lane.lateral + side * lane.width / 2, lane.height + 0.2), at(0.76, lane.lateral + side * lane.width / 2, lane.height + 1.45), 0.12, materials.wood, { segments: 10, castShadow: true });
+      });
+      rideInteraction("warped-wall", "そりたつカベ：Eで駆け上がる", at(0.18, -2.05, 0.3), at(0.71, -2.05, 7.45), 6_500, null, 0.42, 0.06);
+      representation.publishedWallCount = 2;
+      representation.publishedTallWallHeight = 7.2;
+      representation.detailProfile = "official-photo-and-description-matched-large-and-child-scale-curved-warped-walls-eight-segment-quarter-pipe-profiles-dark-side-cheeks-top-decks-and-rails";
+      return true;
+    }
+    if (template === "double-ball-slider") {
+      for (const amount of [0.08, 0.5, 0.94]) {
+        for (const lateral of [-2.55, 2.55]) beam(`ball-slider-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.7), 0.27, materials.wood, { segments: 12, castShadow: true });
+        beam(`ball-slider-frame-cross-${amount}`, at(amount, -2.85, 5.58), at(amount, 2.85, 5.58), 0.26, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const amount of [0.08, 0.94]) for (const lateral of [-2.55, 2.55]) beam(`ball-slider-frame-brace-${amount}-${lateral}`, at(amount, lateral, 0.5), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 5.05), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+      let rideBall = null;
+      let rideStart = null;
+      let rideEnd = null;
+      for (const lane of [-1.35, 1.35]) {
+        const cableFrom = at(0.1, lane, 5.25);
+        const cableTo = at(0.93, lane, 2.15);
+        beam(`ball-slider-steel-cable-${lane}`, cableFrom, cableTo, 0.095, materials.steel, { segments: 12, castShadow: true });
+        const ball = sphere(`ball-slider-orange-ball-${lane}`, 1.02, { ...cableFrom, y: cableFrom.y - 1.62 }, materials.orange, { scaleY: 1.13, segments: 14, castShadow: true });
+        const trolley = box(`ball-slider-red-trolley-${lane}`, [0.75, 0.38, 0.45], { ...cableFrom, y: cableFrom.y - 0.18 }, materials.red, { rotationY: yaw, castShadow: true });
+        beam(`ball-slider-white-grip-rope-${lane}`, { ...cableFrom, y: cableFrom.y - 0.35 }, { ...cableFrom, y: cableFrom.y - 1.58 }, 0.075, whiteRope, { segments: 10, castShadow: true });
+        torus(`ball-slider-grip-eye-${lane}`, 0.16, 0.045, { ...cableFrom, y: cableFrom.y - 1.48 }, materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+        for (let roller = 0; roller < 4; roller += 1) cylinder(`ball-slider-trolley-roller-${lane}-${roller}`, 0.11, 0.1, {
+          x: cableFrom.x + px * ((roller % 2) - 0.5) * 0.38, y: cableFrom.y - 0.03, z: cableFrom.z + pz * ((roller % 2) - 0.5) * 0.38,
+        }, materials.black, { rotationZ: Math.PI / 2, segments: 10, castShadow: true });
+        addAnimation((seconds) => {
+          if (lane < 0 && gameplay.ride?.id === `official-${attraction.officialId}-ball-slider`) return;
+          const amount = (Math.sin(seconds * 0.65 + lane + index) + 1) / 2;
+          const x = lerp(cableFrom.x, cableTo.x, amount);
+          const y = lerp(cableFrom.y, cableTo.y, amount);
+          const z = lerp(cableFrom.z, cableTo.z, amount);
+          ball.position.set(x, y - 1.62, z);
+          trolley.position.set(x, y - 0.18, z);
+        });
+        if (lane < 0) {
+          rideBall = ball;
+          rideStart = { ...cableFrom, y: cableFrom.y - 1.62 };
+          rideEnd = { ...cableTo, y: cableTo.y - 1.62 };
+        }
+      }
+      representation.interactive = true;
+      registerInteraction({
+        id: `official-${attraction.officialId}-ball-slider`, label: `${attraction.name}につかまる`, point: rideStart, radius: 4.2, areaId: attraction.areaId,
+        activate: () => beginLocalRide(`official-${attraction.officialId}-ball-slider`, attraction.areaId, rideStart, rideEnd, 3_200, rideBall, attraction.name, attraction.number - 1, 0, 1.05),
+      });
+      representation.publishedLaneCount = 2;
+      representation.publishedTrolleyRollerCount = 8;
+      representation.detailProfile = "official-photo-and-description-matched-two-parallel-sloping-steel-cables-red-roller-trolleys-white-grip-ropes-and-large-orange-rider-balls-locked-ride-preserved";
+      return true;
+    }
+    if (template === "pachinko-shooter") {
+      const launcher = at(0.28, 0, 1.4);
+      beam("pachinko-launcher-stem", at(0.25, 0, 0), at(0.25, 0, 2.8), 0.24, materials.darkWood, { segments: 12, castShadow: true });
+      beam("pachinko-launcher-left-arm", launcher, at(0.22, -1.45, 3.35), 0.22, materials.darkWood, { segments: 12, castShadow: true });
+      beam("pachinko-launcher-right-arm", launcher, at(0.22, 1.45, 3.35), 0.22, materials.darkWood, { segments: 12, castShadow: true });
+      for (let netLine = 0; netLine < 8; netLine += 1) {
+        const lateral = -1.25 + netLine * 0.36;
+        beam(`pachinko-catch-net-${netLine}`, at(0.22, lateral, 1.25), at(0.22, lateral * 0.72, 3.1), 0.045, whiteRope, { segments: 9, castShadow: true });
+      }
+      const targetCenter = at(0.79, 0, 2.8);
+      box("pachinko-twelve-target-back", [7.2, 5.4, 0.34], targetCenter, materials.steel, { rotationY: yaw, castShadow: true });
+      const panels = [];
+      for (let panel = 0; panel < 12; panel += 1) {
+        const column = panel % 4;
+        const row = Math.floor(panel / 4);
+        const panelCenter = at(0.775, (column - 1.5) * 1.62, 1.25 + row * 1.45);
+        const mesh = box(`pachinko-number-panel-${panel + 1}`, [1.42, 1.22, 0.18], panelCenter, materials.white, { rotationY: yaw, castShadow: true });
+        panels.push(mesh);
+        for (const side of [-1, 1]) cylinder(`pachinko-panel-hinge-${panel}-${side}`, 0.055, 0.12, at(0.765, (column - 1.5) * 1.62 + side * 0.56, 1.73 + row * 1.45), materials.black, { rotationZ: Math.PI / 2, segments: 9, castShadow: true });
+      }
+      const ballStart = at(0.18, 0, 1.05);
+      const ball = sphere("pachinko-ball", 0.48, ballStart, materials.white, { segments: 12, castShadow: true });
+      representation.interactive = true;
+      registerInteraction({ id: `official-${attraction.officialId}-target`, label: `${attraction.name}：ボールを解き放つ`, point: ballStart, radius: 4.2, areaId: attraction.areaId, activate() { representation.targetActivatedAt = performance.now(); playTone(420, 0.08, "square"); return true; } });
+      addAnimation((_seconds, now) => {
+        if (!representation.targetActivatedAt) return;
+        const progress = clamp((now - representation.targetActivatedAt) / 950, 0, 1);
+        ball.position.set(lerp(ballStart.x, targetCenter.x, progress), lerp(ballStart.y, targetCenter.y, progress) + Math.sin(progress * Math.PI) * 2.4, lerp(ballStart.z, targetCenter.z, progress));
+        panels[5].rotation.x = Math.sin(progress * Math.PI) * 1.1;
+        if (progress >= 1) { representation.targetActivatedAt = null; ball.position.set(ballStart.x, ballStart.y, ballStart.z); panels[5].rotation.x = 0; }
+      });
+      representation.publishedTargetCount = 12;
+      representation.detailProfile = "official-photo-and-description-matched-y-shaped-dark-timber-pachinko-launcher-white-rope-catch-pocket-twelve-number-panel-grid-hinges-and-animated-ball-shot";
+      return true;
+    }
+    if (template === "twelve-panel-soccer") {
+      const boardCenter = at(0.78, 0, 2.65);
+      box("soccer-target-steel-back", [8.1, 5.4, 0.34], boardCenter, materials.steel, { rotationY: yaw, castShadow: true });
+      const panels = [];
+      for (let panel = 0; panel < 12; panel += 1) {
+        const column = panel % 4;
+        const row = Math.floor(panel / 4);
+        const center = at(0.765, (column - 1.5) * 1.82, 1.25 + row * 1.45);
+        const targetPanel = box(`soccer-number-panel-${panel + 1}`, [1.62, 1.22, 0.18], center, panel % 5 === 1 ? materials.foam : materials.white, { rotationY: yaw, castShadow: true });
+        panels.push(targetPanel);
+        torus(`soccer-panel-frame-${panel + 1}`, 0.58, 0.045, center, materials.steel, { rotationY: yaw, segments: 4, castShadow: true });
+      }
+      for (const amount of [0.15, 0.93]) for (const lateral of [-4.5, 4.5]) beam(`soccer-net-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.8), 0.17, materials.wood, { segments: 10, castShadow: true });
+      for (let net = 0; net < 10; net += 1) {
+        const lateral = -4.2 + net * 0.94;
+        beam(`soccer-green-net-${net}`, at(0.12, lateral, 0.2), at(0.94, lateral, 5.65), 0.035, materials.teal, { segments: 9, castShadow: true });
+      }
+      const ballStart = at(0.18, 0, 0.62);
+      const ball = sphere("soccer-ball", 0.58, ballStart, materials.white, { segments: 14, castShadow: true });
+      for (let patch = 0; patch < 6; patch += 1) sphere(`soccer-ball-black-patch-${patch}`, 0.16, { x: ballStart.x + Math.sin(patch) * 0.45, y: ballStart.y + Math.cos(patch * 1.7) * 0.38, z: ballStart.z + Math.cos(patch) * 0.45 }, materials.black, { scaleY: 0.35, segments: 7, castShadow: true });
+      representation.interactive = true;
+      registerInteraction({ id: `official-${attraction.officialId}-target`, label: `${attraction.name}：12枚へシュート`, point: ballStart, radius: 4.2, areaId: attraction.areaId, activate() { representation.targetActivatedAt = performance.now(); playTone(360, 0.08, "square"); return true; } });
+      addAnimation((_seconds, now) => {
+        if (!representation.targetActivatedAt) return;
+        const progress = clamp((now - representation.targetActivatedAt) / 850, 0, 1);
+        ball.position.set(lerp(ballStart.x, boardCenter.x, progress), lerp(ballStart.y, boardCenter.y, progress) + Math.sin(progress * Math.PI) * 1.5, lerp(ballStart.z, boardCenter.z, progress));
+        panels[6].rotation.x = Math.sin(progress * Math.PI) * 1.2;
+        if (progress >= 1) { representation.targetActivatedAt = null; ball.position.set(ballStart.x, ballStart.y, ballStart.z); panels[6].rotation.x = 0; }
+      });
+      representation.publishedTargetCount = 12;
+      representation.detailProfile = "official-photo-and-description-matched-four-by-three-twelve-panel-soccer-kick-board-individual-steel-frames-green-safety-net-and-patched-animated-football";
+      return true;
+    }
+    if (template === "nine-panel-pitching") {
+      const boardCenter = at(0.78, 0, 2.55);
+      box("pitching-target-back", [6.6, 5.25, 0.34], boardCenter, materials.steel, { rotationY: yaw, castShadow: true });
+      const panels = [];
+      for (let panel = 0; panel < 9; panel += 1) {
+        const column = panel % 3;
+        const row = Math.floor(panel / 3);
+        const center = at(0.765, (column - 1) * 1.82, 1.18 + row * 1.46);
+        const targetPanel = box(`pitching-number-panel-${panel + 1}`, [1.58, 1.24, 0.18], center, panel % 2 ? materials.darkWood : materials.white, { rotationY: yaw, castShadow: true });
+        panels.push(targetPanel);
+        for (const side of [-1, 1]) cylinder(`pitching-hinge-${panel}-${side}`, 0.055, 0.12, at(0.755, (column - 1) * 1.82 + side * 0.62, 1.66 + row * 1.46), materials.black, { rotationZ: Math.PI / 2, segments: 9, castShadow: true });
+      }
+      for (const amount of [0.13, 0.93]) for (const lateral of [-3.8, 3.8]) beam(`pitching-cage-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.7), 0.16, materials.wood, { segments: 10, castShadow: true });
+      for (let net = 0; net < 8; net += 1) beam(`pitching-green-net-${net}`, at(0.12, -3.6 + net * 1.03, 0.25), at(0.94, -3.6 + net * 1.03, 5.55), 0.035, materials.teal, { segments: 9, castShadow: true });
+      const ballStart = at(0.16, 0, 1.15);
+      const ball = sphere("pitching-ball", 0.34, ballStart, materials.white, { segments: 12, castShadow: true });
+      representation.interactive = true;
+      registerInteraction({ id: `official-${attraction.officialId}-target`, label: `${attraction.name}：9枚へ投球`, point: ballStart, radius: 4.2, areaId: attraction.areaId, activate() { representation.targetActivatedAt = performance.now(); playTone(400, 0.08, "square"); return true; } });
+      addAnimation((_seconds, now) => {
+        if (!representation.targetActivatedAt) return;
+        const progress = clamp((now - representation.targetActivatedAt) / 780, 0, 1);
+        ball.position.set(lerp(ballStart.x, boardCenter.x, progress), lerp(ballStart.y, boardCenter.y, progress) + Math.sin(progress * Math.PI) * 1.9, lerp(ballStart.z, boardCenter.z, progress));
+        panels[4].rotation.x = Math.sin(progress * Math.PI) * 1.35;
+        if (progress >= 1) { representation.targetActivatedAt = null; ball.position.set(ballStart.x, ballStart.y, ballStart.z); panels[4].rotation.x = 0; }
+      });
+      representation.publishedTargetCount = 9;
+      representation.detailProfile = "official-photo-and-description-matched-three-by-three-nine-hinged-pitching-panels-individual-bolts-grey-steel-frame-green-net-cage-and-animated-white-ball";
+      return true;
+    }
+    if (template === "timber-mole-tunnel") {
+      for (const amount of [0.08, 0.94]) for (const lateral of [-2.15, 2.15]) beam(`mole-tunnel-support-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 3.9), 0.27, materials.wood, { segments: 12, castShadow: true });
+      const hoopCount = 6;
+      for (let hoop = 0; hoop < hoopCount; hoop += 1) torus(`mole-tunnel-steel-hoop-${hoop}`, 1.72, 0.07, at(0.12 + hoop * 0.16, 0, 1.82), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 22, castShadow: true });
+      const staveCount = 14;
+      for (let stave = 0; stave < staveCount; stave += 1) {
+        const angle = stave / staveCount * Math.PI * 2;
+        const lateral = Math.cos(angle) * 1.65;
+        const height = 1.82 + Math.sin(angle) * 1.65;
+        beam(`mole-tunnel-timber-stave-${stave}`, at(0.1, lateral, height), at(0.94, lateral, height), 0.18, materials.darkWood, { segments: 10, castShadow: true });
+      }
+      for (let hatch = 0; hatch < 4; hatch += 1) {
+        const amount = 0.26 + hatch * 0.18;
+        torus(`mole-lookout-hatch-${hatch}`, 0.56, 0.1, at(amount, hatch % 2 ? 1.55 : -1.55, 2.7), materials.steel, { rotationY: yaw, segments: 18, castShadow: true });
+        beam(`mole-hatch-rim-log-${hatch}`, at(amount - 0.04, hatch % 2 ? 1.5 : -1.5, 2.18), at(amount + 0.04, hatch % 2 ? 1.5 : -1.5, 3.18), 0.12, materials.wood, { segments: 10, castShadow: true });
+      }
+      orientedSurface(`${attraction.officialId}-mole-tunnel-floor`, at(0.52, 0, 0.24), 2.55, length * 0.8, 0.22);
+      rideInteraction("mole-tunnel", "モグラのきぶん：Eで木のトンネルを進む", at(0.09, 0, 0.35), at(0.95, 0, 0.35), 5_800, null, 0.68, 0.1);
+      representation.publishedStaveCount = staveCount;
+      representation.publishedLookoutHatchCount = 4;
+      representation.detailProfile = "official-photo-and-description-matched-round-barrel-like-fourteen-timber-stave-crawl-tunnel-six-steel-hoops-four-peek-out-hatches-and-log-support-frame";
+      return true;
+    }
+    if (template === "castle-escape-slide") {
+      const slideSegments = 8;
+      const slideStart = at(0.1, 0, 4.25);
+      const slideEnd = at(0.92, 0, 0.28);
+      for (let segment = 0; segment < slideSegments; segment += 1) {
+        const fromAmount = lerp(0.1, 0.92, segment / slideSegments);
+        const toAmount = lerp(0.1, 0.92, (segment + 1) / slideSegments);
+        const fromHeight = lerp(4.25, 0.28, segment / slideSegments);
+        const toHeight = lerp(4.25, 0.28, (segment + 1) / slideSegments);
+        const from = at(fromAmount, 0, fromHeight);
+        const to = at(toAmount, 0, toHeight);
+        const horizontal = Math.hypot(to.x - from.x, to.z - from.z);
+        const pitch = -Math.atan2(to.y - from.y, horizontal);
+        const center = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2, z: (from.z + to.z) / 2 };
+        playable(`escape-slide-steel-bed-${segment}`, [2.45, 0.16, Math.hypot(horizontal, to.y - from.y) + 0.16], center, materials.steel, {
+          rotationX: pitch, rotationY: yaw, castShadow: true,
+        });
+        for (const side of [-1, 1]) {
+          const wallCenter = {
+            x: center.x + px * side * 1.34,
+            y: center.y + 0.62,
+            z: center.z + pz * side * 1.34,
+          };
+          box(`escape-slide-dark-sidewall-${segment}-${side}`, [0.22, 1.28, horizontal + 0.32], wallCenter, materials.darkWood, {
+            rotationX: pitch, rotationY: yaw, castShadow: true,
+          });
+          sphere(`escape-slide-rivet-${segment}-${side}`, 0.075, {
+            x: wallCenter.x - ux * horizontal * 0.28,
+            y: wallCenter.y + 0.22,
+            z: wallCenter.z - uz * horizontal * 0.28,
+          }, materials.steel, { segments: 10, castShadow: true });
+          sphere(`escape-slide-rivet-tail-${segment}-${side}`, 0.075, {
+            x: wallCenter.x + ux * horizontal * 0.28,
+            y: wallCenter.y + 0.22,
+            z: wallCenter.z + uz * horizontal * 0.28,
+          }, materials.steel, { segments: 10, castShadow: true });
+        }
+      }
+      for (const side of [-1, 1]) {
+        beam(`escape-slide-entry-post-${side}`, at(0.08, side * 1.58, 0), at(0.08, side * 1.58, 5.35), 0.22, materials.darkWood, { segments: 12, castShadow: true });
+        beam(`escape-slide-entry-cap-${side}`, at(0.08, side * 1.58, 5.35), at(0.18, side * 1.42, 5.05), 0.18, materials.wood, { segments: 12, castShadow: true });
+      }
+      rideInteraction("escape-slide", "秘密の脱出路：Eで滑る", slideStart, slideEnd, 3_400, null, 0.75, 0.04);
+      representation.publishedSlideSegmentCount = slideSegments;
+      representation.publishedFastenerCount = slideSegments * 4;
+      representation.detailProfile = "official-photo-and-description-matched-dark-castle-sidewalls-curved-eight-panel-steel-escape-slide-rivets-entry-posts-and-low-child-friendly-runout";
+      return true;
+    }
+    if (template === "swinging-ring-road") {
+      for (const amount of [0.08, 0.94]) {
+        for (const lateral of [-2.75, 2.75]) {
+          beam(`ring-road-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.25), 0.27, materials.wood, { segments: 12, castShadow: true });
+          beam(`ring-road-brace-${amount}-${lateral}`, at(amount, lateral, 0.75), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.65), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`ring-road-end-crossbar-${amount}`, at(amount, -2.95, 5.22), at(amount, 2.95, 5.22), 0.28, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("ring-road-overhead-log", at(0.08, 0, 5.18), at(0.94, 0, 5.18), 0.24, materials.wood, { segments: 12, castShadow: true });
+      const ringCount = 7;
+      for (let ringIndex = 0; ringIndex < ringCount; ringIndex += 1) {
+        const amount = 0.17 + ringIndex * 0.115;
+        const center = at(amount, 0, 1.15 + (ringIndex % 2) * 0.12);
+        const top = at(amount, 0, 5.08);
+        beam(`ring-road-white-hanger-${ringIndex}`, { ...center, y: center.y + 0.88 }, top, 0.065, whiteRope, { segments: 10, castShadow: true });
+        torus(`ring-road-steel-ring-${ringIndex}`, 0.82, 0.11, center, materials.steel, { rotationY: yaw + Math.PI / 2, segments: 20, castShadow: true });
+        torus(`ring-road-hanger-eye-${ringIndex}`, 0.14, 0.04, { ...center, y: center.y + 0.94 }, materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+        sphere(`ring-road-rope-knot-${ringIndex}`, 0.12, { ...center, y: center.y + 1.08 }, whiteRope, { segments: 9, castShadow: true });
+        orientedSurface(`${attraction.officialId}-ring-step-${ringIndex}`, center, 1.12, 0.58, center.y - 0.63);
+      }
+      rideInteraction("ring-road", "揺れるリングロード：Eでロープを握る", at(0.13, 0, 0.62), at(0.93, 0, 0.62), 5_400, null, 0.9, 0.32);
+      representation.publishedRingCount = ringCount;
+      representation.detailProfile = "official-photo-and-description-matched-seven-grey-foot-rings-white-rope-hangers-eyelets-knots-and-braced-round-timber-gantry";
+      return true;
+    }
+    if (template === "suspended-iron-bar") {
+      for (const amount of [0.08, 0.94]) {
+        for (const lateral of [-2.55, 2.55]) {
+          beam(`iron-bar-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.15), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`iron-bar-brace-${amount}-${lateral}`, at(amount, lateral, 0.65), at(amount + (amount < 0.5 ? 0.13 : -0.13), lateral, 4.55), 0.18, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`iron-bar-frame-cross-${amount}`, at(amount, -2.78, 5.08), at(amount, 2.78, 5.08), 0.27, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("iron-bar-overhead-log", at(0.08, 0, 5), at(0.94, 0, 5), 0.25, materials.wood, { segments: 12, castShadow: true });
+      const hangerCount = 5;
+      for (let hanger = 0; hanger < hangerCount; hanger += 1) {
+        const amount = 0.15 + hanger * 0.19;
+        beam(`iron-bar-white-loop-${hanger}`, at(amount, 0, 4.95), at(amount, 0, 3.42), 0.07, whiteRope, { segments: 10, castShadow: true });
+        torus(`iron-bar-shackle-${hanger}`, 0.14, 0.045, at(amount, 0, 3.33), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+        sphere(`iron-bar-lashing-knot-${hanger}`, 0.12, at(amount, 0, 4.76), whiteRope, { segments: 9, castShadow: true });
+        sphere(`iron-bar-cap-bolt-${hanger}`, 0.065, at(amount, 0.23, 5.02), materials.steel, { segments: 9, castShadow: true });
+      }
+      beam("iron-bar-polished-steel-traverse", at(0.14, 0, 3.22), at(0.9, 0, 3.22), 0.105, materials.steel, { segments: 14, castShadow: true });
+      orientedSurface(`${attraction.officialId}-bar-grip-line`, at(0.52, 0, 2.9), 0.72, length * 0.72, 2.82);
+      rideInteraction("iron-bar", "魔境の鉄棒：Eで横移動", at(0.13, 0, 2.85), at(0.92, 0, 2.85), 5_800, null, 0.42, 0.18);
+      representation.publishedHangerCount = hangerCount;
+      representation.detailProfile = "official-photo-and-description-matched-single-long-polished-horizontal-bar-five-short-white-rope-loops-shackles-lashings-and-heavy-a-frame-timbers";
+      return true;
+    }
+    if (template === "triangular-net-dungeon") {
+      for (const amount of [0.08, 0.94]) {
+        for (const lateral of [-2.6, 2.6]) {
+          beam(`net-dungeon-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.85), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`net-dungeon-brace-${amount}-${lateral}`, at(amount, lateral, 0.5), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.4), 0.18, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`net-dungeon-end-cross-${amount}`, at(amount, -2.85, 4.75), at(amount, 2.85, 4.75), 0.27, materials.wood, { segments: 12, castShadow: true });
+      }
+      const ribCount = 8;
+      for (let rib = 0; rib < ribCount; rib += 1) {
+        const amount = 0.13 + rib * 0.115;
+        const left = at(amount, -2.15, 0.42);
+        const right = at(amount, 2.15, 0.42);
+        const apex = at(amount, 0, 3.45);
+        beam(`net-dungeon-rib-left-${rib}`, left, apex, 0.062, whiteRope, { segments: 9, castShadow: true });
+        beam(`net-dungeon-rib-right-${rib}`, apex, right, 0.062, whiteRope, { segments: 9, castShadow: true });
+        beam(`net-dungeon-rib-floor-${rib}`, left, right, 0.062, whiteRope, { segments: 9, castShadow: true });
+      }
+      for (let strand = 0; strand <= 5; strand += 1) {
+        const fraction = strand / 5;
+        const height = 0.42 + fraction * 3.03;
+        const lateral = 2.15 * (1 - fraction);
+        beam(`net-dungeon-long-left-${strand}`, at(0.13, -lateral, height), at(0.935, -lateral, height), 0.052, whiteRope, { segments: 9, castShadow: true });
+        beam(`net-dungeon-long-right-${strand}`, at(0.13, lateral, height), at(0.935, lateral, height), 0.052, whiteRope, { segments: 9, castShadow: true });
+      }
+      orientedSurface(`${attraction.officialId}-net-dungeon-floor`, at(0.53, 0, 0.4), 3.8, length * 0.76, 0.36);
+      rideInteraction("net-dungeon", "ネットダンジョン：Eで潜る", at(0.11, 0, 0.55), at(0.95, 0, 0.55), 6_200, null, 0.72, 0.12);
+      representation.publishedTriangularRibCount = ribCount;
+      representation.detailProfile = "official-photo-and-description-matched-dense-white-triangular-prism-crawl-net-eight-ribs-twelve-longitudinal-strands-and-braced-log-dungeon-frame";
+      return true;
+    }
+    if (template === "transparent-floating-walls") {
+      for (const amount of [0.13, 0.9]) {
+        for (const lateral of [-1.32, 1.32]) {
+          beam(`floating-wall-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.35), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`floating-wall-ground-brace-${amount}-${lateral}`, at(amount, lateral, 0.35), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral * 1.6, 3.75), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+      }
+      for (const lateral of [-1.22, 1.22]) {
+        box(`floating-wall-clear-panel-${lateral}`, [0.13, 4.7, length * 0.72], at(0.52, lateral, 2.55), materials.foam, { rotationY: yaw, castShadow: true });
+        for (let rail = 0; rail < 5; rail += 1) {
+          const height = 0.62 + rail * 1.02;
+          beam(`floating-wall-timber-rail-${lateral}-${rail}`, at(0.14, lateral, height), at(0.9, lateral, height), 0.13, materials.darkWood, { segments: 10, castShadow: true });
+          sphere(`floating-wall-bolt-a-${lateral}-${rail}`, 0.07, at(0.18, lateral * 1.04, height), materials.steel, { segments: 9, castShadow: true });
+          sphere(`floating-wall-bolt-b-${lateral}-${rail}`, 0.07, at(0.86, lateral * 1.04, height), materials.steel, { segments: 9, castShadow: true });
+        }
+      }
+      rideInteraction("floating-walls", "魔王の浮遊壁：Eで両壁を登る", at(0.16, 0, 0.35), at(0.88, 0, 4.75), 7_200, null, 0.42, 0.08);
+      representation.publishedTransparentPanelCount = 2;
+      representation.publishedWallRailCount = 10;
+      representation.detailProfile = "official-photo-and-description-matched-twin-close-set-transparent-chimney-climb-panels-ten-dark-timber-rails-twenty-bolt-heads-and-external-a-braces";
+      return true;
+    }
+    if (template === "multi-height-chimney-wall") {
+      const wallProfiles = [
+        { lateral: -1.85, height: 3.35, width: 2.3 },
+        { lateral: 0, height: 6.35, width: 2.45 },
+        { lateral: 1.85, height: 4.45, width: 2.3 },
+      ];
+      wallProfiles.forEach((profile, wallIndex) => {
+        box(`chimney-wall-panel-${wallIndex}`, [profile.width, profile.height, 0.52], at(0.56, profile.lateral, profile.height / 2), materials.darkWood, { rotationY: yaw, castShadow: true });
+        playable(`chimney-wall-top-cap-${wallIndex}`, [profile.width + 0.18, 0.28, 0.72], at(0.56, profile.lateral, profile.height), materials.darkWood, { rotationY: yaw, castShadow: true });
+        for (let seam = 1; seam <= 2; seam += 1) {
+          box(`chimney-wall-panel-seam-${wallIndex}-${seam}`, [profile.width - 0.08, 0.055, 0.58], at(0.555, profile.lateral, profile.height * seam / 3), materials.black, { rotationY: yaw, castShadow: true });
+        }
+        for (let boltIndex = 0; boltIndex < 4; boltIndex += 1) {
+          sphere(`chimney-wall-fastener-${wallIndex}-${boltIndex}`, 0.075, at(0.535, profile.lateral + (boltIndex % 2 ? 0.78 : -0.78), 0.72 + Math.floor(boltIndex / 2) * (profile.height - 1.4)), materials.steel, { segments: 9, castShadow: true });
+        }
+      });
+      for (const lateral of [-2.85, -1.55]) beam(`chimney-ladder-rail-${lateral}`, at(0.43, lateral, 0.12), at(0.43, lateral, 4.05), 0.16, materials.wood, { segments: 10, castShadow: true });
+      for (let rung = 0; rung < 6; rung += 1) beam(`chimney-ladder-rung-${rung}`, at(0.43, -2.85, 0.55 + rung * 0.62), at(0.43, -1.55, 0.55 + rung * 0.62), 0.14, materials.darkWood, { segments: 10, castShadow: true });
+      for (let hold = 0; hold < 8; hold += 1) sphere(`chimney-colour-hold-${hold}`, 0.15, at(0.525, 0.42 + (hold % 2) * 0.55, 1 + hold * 0.59), [materials.coral, materials.teal, materials.yellow, materials.blue][hold % 4], { scaleX: 1.25, scaleY: 0.65, segments: 10, castShadow: true });
+      rideInteraction("chimney-wall", "立ちはだかる壁：Eで壁間を登る", at(0.5, 0, 0.3), at(0.58, 0, 6.55), 7_600, null, 0.42, 0.06);
+      representation.publishedWallCount = wallProfiles.length;
+      representation.detailProfile = "official-photo-and-description-matched-three-dark-panel-towers-at-stepped-heights-chimney-gap-log-ladder-colour-bouldering-holds-seams-and-fasteners";
+      return true;
+    }
+    if (template === "healing-timber-swing") {
+      const topLeft = at(0.55, -2.45, 5.45);
+      const topRight = at(0.55, 2.45, 5.45);
+      for (const side of [-1, 1]) {
+        beam(`healing-swing-front-leg-${side}`, at(0.38, side * 3.1, 0), at(0.55, side * 2.45, 5.45), 0.29, materials.wood, { segments: 12, castShadow: true });
+        beam(`healing-swing-back-leg-${side}`, at(0.72, side * 3.1, 0), at(0.55, side * 2.45, 5.45), 0.29, materials.wood, { segments: 12, castShadow: true });
+        beam(`healing-swing-diagonal-brace-${side}`, at(0.4, side * 3.02, 0.75), at(0.55, side * 2.47, 4.15), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+      }
+      beam("healing-swing-top-crossbar", topLeft, topRight, 0.29, materials.wood, { segments: 12, castShadow: true });
+      for (const side of [-1, 1]) {
+        torus(`healing-swing-top-collar-${side}`, 0.34, 0.055, side < 0 ? topLeft : topRight, materials.steel, { rotationY: yaw, segments: 14, castShadow: true });
+        cylinder(`healing-swing-ground-shoe-${side}`, 0.42, 0.14, at(0.55, side * 3.1, 0.07), materials.steel, { segments: 12, castShadow: true });
+      }
+      const seatCenter = at(0.55, 0, 1.2);
+      playable("healing-swing-seat-core", [3.35, 0.34, 1.15], { ...seatCenter, y: seatCenter.y - 0.17 }, materials.darkWood, { rotationY: yaw, dynamic: true, castShadow: true });
+      for (let plank = 0; plank < 6; plank += 1) {
+        box(`healing-swing-seat-plank-${plank}`, [0.49, 0.16, 1.03], {
+          x: seatCenter.x + px * (-1.25 + plank * 0.5), y: seatCenter.y + 0.02, z: seatCenter.z + pz * (-1.25 + plank * 0.5),
+        }, materials.wood, { rotationY: yaw, castShadow: true });
+      }
+      for (const side of [-1, 1]) {
+        const seatEdge = { x: seatCenter.x + px * side * 1.35, y: seatCenter.y + 0.1, z: seatCenter.z + pz * side * 1.35 };
+        const top = side < 0 ? topLeft : topRight;
+        beam(`healing-swing-white-rope-${side}`, seatEdge, { ...top, y: top.y - 0.16 }, 0.07, whiteRope, { segments: 10, castShadow: true });
+        beam(`healing-swing-chain-${side}`, { ...top, y: top.y - 0.16 }, { ...top, y: top.y - 0.72 }, 0.075, materials.steel, { segments: 10, castShadow: true });
+        box(`healing-swing-under-bracket-${side}`, [0.22, 0.3, 1.22], seatEdge, materials.steel, { rotationY: yaw, castShadow: true });
+        for (const end of [-1, 1]) sphere(`healing-swing-seat-bolt-${side}-${end}`, 0.075, {
+          x: seatEdge.x + ux * end * 0.38, y: seatEdge.y + 0.18, z: seatEdge.z + uz * end * 0.38,
+        }, materials.steel, { segments: 9, castShadow: true });
+      }
+      rideInteraction("healing-swing", "癒しのブランコ：Eで乗る", at(0.52, 0, 1.15), at(0.62, 0, 1.65), 2_800, null, 0.55, 0.4);
+      representation.publishedSeatPlankCount = 6;
+      representation.detailProfile = "official-photo-and-description-matched-wide-six-plank-dark-timber-bench-swing-white-rope-steel-chain-hangers-a-frame-braces-underbrackets-and-seat-bolts";
+      return true;
+    }
+    if (template === "twin-net-tunnels") {
+      for (const amount of [0.08, 0.5, 0.94]) {
+        for (const lateral of [-2.65, 2.65]) beam(`twin-tunnel-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.55), 0.28, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const amount of [0.08, 0.94]) {
+        beam(`twin-tunnel-crossbar-${amount}`, at(amount, -2.9, 4.45), at(amount, 2.9, 4.45), 0.27, materials.wood, { segments: 12, castShadow: true });
+        for (const lateral of [-2.65, 2.65]) beam(`twin-tunnel-brace-${amount}-${lateral}`, at(amount, lateral, 0.5), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.05), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+      }
+      const lanes = [-1.25, 1.25];
+      for (const lane of lanes) {
+        for (let hoop = 0; hoop < 5; hoop += 1) torus(`twin-tunnel-hoop-${lane}-${hoop}`, 1.15, 0.065, at(0.14 + hoop * 0.19, lane, 1.45), whiteRope, { rotationY: yaw + Math.PI / 2, segments: 20, castShadow: true });
+        for (let strand = 0; strand < 10; strand += 1) {
+          const angle = strand / 10 * Math.PI * 2;
+          beam(`twin-tunnel-longitudinal-${lane}-${strand}`, at(0.14, lane + Math.cos(angle) * 1.12, 1.45 + Math.sin(angle) * 1.12), at(0.9, lane + Math.cos(angle) * 1.12, 1.45 + Math.sin(angle) * 1.12), 0.052, whiteRope, { segments: 9, castShadow: true });
+        }
+        orientedSurface(`${attraction.officialId}-twin-tunnel-floor-${lane}`, at(0.52, lane, 0.38), 1.55, length * 0.74, 0.34);
+      }
+      rideInteraction("twin-net-tunnels", "試練のトンネル：Eで2本同時スタート", at(0.12, -1.25, 0.48), at(0.92, -1.25, 0.48), 5_900, null, 0.7, 0.14);
+      representation.publishedTunnelCount = 2;
+      representation.publishedNetStrandCount = 20;
+      representation.detailProfile = "official-photo-and-description-matched-two-parallel-round-white-rope-race-tunnels-ten-hoops-twenty-longitudinal-strands-and-six-post-log-frame";
+      return true;
+    }
+    if (template === "double-trapeze-jump") {
+      for (const side of [-1, 1]) {
+        beam(`jump-frame-front-leg-${side}`, at(0.22, side * 3.15, 0), at(0.38, side * 2.55, 5.65), 0.29, materials.wood, { segments: 12, castShadow: true });
+        beam(`jump-frame-back-leg-${side}`, at(0.54, side * 3.15, 0), at(0.38, side * 2.55, 5.65), 0.29, materials.wood, { segments: 12, castShadow: true });
+        beam(`jump-frame-brace-${side}`, at(0.24, side * 3.06, 0.7), at(0.38, side * 2.58, 4.55), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+      }
+      beam("jump-frame-top-log", at(0.38, -2.82, 5.62), at(0.38, 2.82, 5.62), 0.28, materials.wood, { segments: 12, castShadow: true });
+      const trapezes = [
+        { lateral: -1.18, height: 3.25 },
+        { lateral: 1.18, height: 2.42 },
+      ];
+      trapezes.forEach((trapeze, trapezeIndex) => {
+        for (const end of [-1, 1]) {
+          const lateral = trapeze.lateral + end * 0.58;
+          beam(`jump-trapeze-white-rope-${trapezeIndex}-${end}`, at(0.38, lateral, 5.52), at(0.38, lateral, trapeze.height), 0.065, whiteRope, { segments: 10, castShadow: true });
+          torus(`jump-trapeze-eye-${trapezeIndex}-${end}`, 0.13, 0.04, at(0.38, lateral, trapeze.height + 0.05), materials.steel, { rotationY: yaw, segments: 12, castShadow: true });
+        }
+        beam(`jump-trapeze-steel-bar-${trapezeIndex}`, at(0.38, trapeze.lateral - 0.7, trapeze.height), at(0.38, trapeze.lateral + 0.7, trapeze.height), 0.095, materials.steel, { segments: 14, castShadow: true });
+      });
+      const matCenter = at(0.72, 0, 0.18);
+      playable("jump-landing-mat-core", [6.4, 0.36, Math.max(5.8, length * 0.34)], { ...matCenter, y: matCenter.y - 0.18 }, materials.teal, { rotationY: yaw, castShadow: true });
+      for (let seam = 0; seam < 10; seam += 1) {
+        const lateral = -2.7 + (seam % 5) * 1.35;
+        const along = -1 + Math.floor(seam / 5) * 2;
+        box(`jump-mat-quilt-panel-${seam}`, [1.22, 0.12, 1.75], {
+          x: matCenter.x + px * lateral + ux * along, y: matCenter.y + 0.04, z: matCenter.z + pz * lateral + uz * along,
+        }, seam % 2 ? materials.teal : materials.lime, { rotationY: yaw, castShadow: true });
+      }
+      for (let peg = 0; peg < 8; peg += 1) cylinder(`jump-distance-peg-${peg}`, 0.09, 0.85, at(0.61 + peg * 0.045, 3.8, 0.42), materials.wood, { segments: 9, castShadow: true });
+      rideInteraction("trapeze-jump", "異次元のジャンプ：Eで鉄棒から跳ぶ", at(0.36, -1.18, 3.05), at(0.82, 0, 0.55), 3_300, null, 0.48, 0.35);
+      representation.publishedTrapezeCount = 2;
+      representation.publishedLandingPanelCount = 10;
+      representation.detailProfile = "official-photo-and-description-matched-two-staggered-height-steel-trapeze-bars-white-rope-eyelets-green-quilted-landing-mat-distance-pegs-and-a-frame";
+      return true;
+    }
+    if (template === "sideways-rope-traverse") {
+      for (const amount of [0.08, 0.5, 0.94]) {
+        for (const lateral of [-2.55, 2.55]) {
+          beam(`rope-traverse-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.95), 0.27, materials.wood, { segments: 12, castShadow: true });
+          if (amount !== 0.5) beam(`rope-traverse-brace-${amount}-${lateral}`, at(amount, lateral, 0.45), at(amount + (amount < 0.5 ? 0.13 : -0.13), lateral, 4.4), 0.17, materials.lightWood, { segments: 10, castShadow: true });
+        }
+      }
+      for (const lateral of [-2.55, 2.55]) {
+        beam(`rope-traverse-top-log-${lateral}`, at(0.08, lateral, 4.85), at(0.94, lateral, 4.85), 0.24, materials.wood, { segments: 12, castShadow: true });
+        playable(`rope-traverse-narrow-foot-log-${lateral}`, [0.55, 0.3, length * 0.78], at(0.51, lateral * 0.62, 0.58), materials.darkWood, { rotationY: yaw, castShadow: true });
+        for (const height of [1.25, 2.08, 3.02]) {
+          beam(`rope-traverse-white-handline-${lateral}-${height}`, at(0.08, lateral * 0.82, height), at(0.94, lateral * 0.82, height), 0.065, whiteRope, { segments: 10, castShadow: true });
+          for (const amount of [0.08, 0.5, 0.94]) sphere(`rope-traverse-lashing-${lateral}-${height}-${amount}`, 0.12, at(amount, lateral * 0.82, height), whiteRope, { segments: 9, castShadow: true });
+        }
+      }
+      rideInteraction("sideways-rope", "冒険者のロープ渡り：Eで横向きに進む", at(0.1, -1.58, 0.65), at(0.93, -1.58, 0.65), 6_200, null, 0.65, 0.42);
+      representation.publishedHandlineCount = 6;
+      representation.detailProfile = "official-photo-and-description-matched-sideways-double-narrow-dark-foot-logs-six-parallel-white-handlines-eighteen-lashings-and-six-post-timber-frame";
+      return true;
+    }
+    if (template === "suspended-zigzag-road") {
+      const plankCount = 8;
+      for (const amount of [0.08, 0.95]) {
+        for (const lateral of [-2.8, 2.8]) {
+          beam(
+            `zigzag-frame-post-${amount}-${lateral}`,
+            at(amount, lateral, 0),
+            at(amount, lateral, 5.35),
+            0.27,
+            materials.wood,
+            { castShadow: true, segments: 12 },
+          );
+          const braceDirection = amount < 0.5 ? 1 : -1;
+          beam(
+            `zigzag-frame-brace-${amount}-${lateral}`,
+            at(amount, lateral, 1.15),
+            at(amount + braceDirection * 0.1, lateral, 4.95),
+            0.18,
+            materials.lightWood,
+            { castShadow: true, segments: 10 },
+          );
+        }
+        beam(
+          `zigzag-frame-crossbar-${amount}`,
+          at(amount, -3.05, 5.35),
+          at(amount, 3.05, 5.35),
+          0.28,
+          materials.wood,
+          { castShadow: true, segments: 12 },
+        );
+      }
+      for (const lateral of [-2.8, 2.8]) {
+        beam(
+          `zigzag-frame-top-rail-${lateral}`,
+          at(0.08, lateral, 5.35),
+          at(0.95, lateral, 5.35),
+          0.25,
+          materials.wood,
+          { castShadow: true, segments: 12 },
+        );
+      }
+
+      for (let plankIndex = 0; plankIndex < plankCount; plankIndex += 1) {
+        const amount = 0.15 + plankIndex * 0.105;
+        const lateral = (plankIndex % 2 ? 0.72 : -0.72) + Math.sin(plankIndex * 1.4) * 0.18;
+        const plankSurface = at(amount, lateral, 0.68 + (plankIndex % 3) * 0.045);
+        const plankAngle = yaw + (plankIndex % 2 ? 0.48 : -0.48);
+        playable(
+          `zigzag-suspended-plank-${plankIndex}`,
+          [3.35, 0.26, 0.72],
+          { ...plankSurface, y: plankSurface.y - 0.13 },
+          plankIndex % 2 ? materials.wood : materials.lightWood,
+          { rotationY: plankAngle, castShadow: true },
+        );
+        for (const side of [-1, 1]) {
+          const ropeBottom = {
+            x: plankSurface.x + Math.cos(plankAngle) * side * 1.38,
+            y: plankSurface.y + 0.08,
+            z: plankSurface.z - Math.sin(plankAngle) * side * 1.38,
+          };
+          const ropeTop = at(amount, side * 2.32, 5.25);
+          beam(
+            `zigzag-white-hanger-${plankIndex}-${side}`,
+            ropeBottom,
+            ropeTop,
+            0.065,
+            whiteRope,
+            { castShadow: true, segments: 10 },
+          );
+          torus(
+            `zigzag-rope-eye-${plankIndex}-${side}`,
+            0.16,
+            0.045,
+            { ...ropeBottom, y: ropeBottom.y + 0.01 },
+            materials.steel,
+            { rotationX: Math.PI / 2, segments: 12, castShadow: true },
+          );
+          cylinder(
+            `zigzag-carriage-bolt-${plankIndex}-${side}`,
+            0.075,
+            0.08,
+            { ...ropeBottom, y: ropeBottom.y + 0.1 },
+            materials.steel,
+            { segments: 10, castShadow: true },
+          );
+        }
+      }
+      representation.publishedPlankCount = plankCount;
+      representation.publishedRopeCount = plankCount * 2;
+      representation.publishedFastenerCount = plankCount * 4;
+      representation.detailProfile = "official-photo-matched-eight-individually-hung-zigzag-timber-planks-white-rope-eyes-carriage-bolts-and-braced-log-gantry";
+      return true;
+    }
+    if (template === "low-hero-zigzag-path") {
+      const pathPoints = [
+        [0.07, -0.75], [0.18, -0.75], [0.29, 0.82], [0.4, 0.82], [0.51, -0.88],
+        [0.62, -0.88], [0.73, 0.68], [0.84, 0.68], [0.96, -0.35],
+      ];
+      for (let segmentIndex = 0; segmentIndex < pathPoints.length - 1; segmentIndex += 1) {
+        const [fromAmount, fromLateral] = pathPoints[segmentIndex];
+        const [toAmount, toLateral] = pathPoints[segmentIndex + 1];
+        const from = at(fromAmount, fromLateral, 0.34);
+        const to = at(toAmount, toLateral, 0.34);
+        const segmentX = to.x - from.x;
+        const segmentZ = to.z - from.z;
+        const segmentLength = Math.hypot(segmentX, segmentZ);
+        const segmentYaw = Math.atan2(segmentX, segmentZ);
+        const center = {
+          x: (from.x + to.x) / 2,
+          y: (from.y + to.y) / 2,
+          z: (from.z + to.z) / 2,
+        };
+        const segmentPX = -segmentZ / segmentLength;
+        const segmentPZ = segmentX / segmentLength;
+        playable(
+          `hero-path-top-plank-${segmentIndex}`,
+          [1.24, 0.24, segmentLength + 0.16],
+          { ...center, y: center.y - 0.12 },
+          materials.wood,
+          { rotationY: segmentYaw, castShadow: true },
+        );
+        box(
+          `hero-path-underframe-${segmentIndex}`,
+          [1.38, 0.34, segmentLength + 0.08],
+          { ...center, y: center.y - 0.39 },
+          materials.darkWood,
+          { rotationY: segmentYaw, castShadow: true },
+        );
+        for (const side of [-1, 1]) {
+          box(
+            `hero-path-side-fascia-${segmentIndex}-${side}`,
+            [0.15, 0.34, segmentLength + 0.12],
+            {
+              x: center.x + segmentPX * side * 0.62,
+              y: center.y - 0.26,
+              z: center.z + segmentPZ * side * 0.62,
+            },
+            materials.lightWood,
+            { rotationY: segmentYaw, castShadow: true },
+          );
+          const bolt = {
+            x: center.x + segmentPX * side * 0.36,
+            y: center.y + 0.045,
+            z: center.z + segmentPZ * side * 0.36,
+          };
+          torus(
+            `hero-path-washer-${segmentIndex}-${side}`,
+            0.11,
+            0.028,
+            bolt,
+            materials.steel,
+            { rotationX: Math.PI / 2, segments: 12, castShadow: true },
+          );
+          cylinder(
+            `hero-path-bolt-${segmentIndex}-${side}`,
+            0.065,
+            0.08,
+            { ...bolt, y: bolt.y + 0.035 },
+            materials.steel,
+            { segments: 10, castShadow: true },
+          );
+        }
+      }
+      for (let footingIndex = 0; footingIndex < pathPoints.length; footingIndex += 1) {
+        const [amount, lateral] = pathPoints[footingIndex];
+        box(
+          `hero-path-ground-footing-${footingIndex}`,
+          [1.62, 0.16, 0.5],
+          at(amount, lateral, 0.06),
+          materials.darkWood,
+          { rotationY: yaw, castShadow: true },
+        );
+      }
+      representation.publishedSegmentCount = pathPoints.length - 1;
+      representation.publishedFastenerCount = (pathPoints.length - 1) * 4;
+      representation.detailProfile = "official-photo-matched-low-continuous-eight-segment-angular-timber-balance-path-layered-side-fascias-ground-feet-bolts-and-washers";
+      return true;
+    }
+    if (template === "rocking-balance-road") {
+      for (const amount of [0.08, 0.95]) {
+        for (const lateral of [-3, 3]) {
+          beam(
+            `balance-frame-post-${amount}-${lateral}`,
+            at(amount, lateral, 0),
+            at(amount, lateral, 5.45),
+            0.29,
+            materials.wood,
+            { castShadow: true, segments: 12 },
+          );
+          const braceDirection = amount < 0.5 ? 1 : -1;
+          beam(
+            `balance-frame-brace-${amount}-${lateral}`,
+            at(amount, lateral, 1.25),
+            at(amount + braceDirection * 0.11, lateral, 5.05),
+            0.18,
+            materials.lightWood,
+            { castShadow: true, segments: 10 },
+          );
+        }
+        beam(
+          `balance-frame-crossbar-${amount}`,
+          at(amount, -3.2, 5.45),
+          at(amount, 3.2, 5.45),
+          0.29,
+          materials.wood,
+          { castShadow: true, segments: 12 },
+        );
+      }
+      for (const lateral of [-3, 3]) {
+        beam(
+          `balance-frame-top-rail-${lateral}`,
+          at(0.08, lateral, 5.45),
+          at(0.95, lateral, 5.45),
+          0.27,
+          materials.wood,
+          { castShadow: true, segments: 12 },
+        );
+      }
+      for (const lateral of [-2.5, 2.5]) {
+        for (const height of [1.75, 2.25]) {
+          beam(
+            `balance-white-handline-${lateral}-${height}`,
+            at(0.08, lateral, height),
+            at(0.95, lateral, height),
+            0.072,
+            whiteRope,
+            { castShadow: true, segments: 10 },
+          );
+        }
+      }
+
+      const rockerCount = 8;
+      for (let rockerIndex = 0; rockerIndex < rockerCount; rockerIndex += 1) {
+        const amount = 0.15 + rockerIndex * 0.105;
+        const lateral = rockerIndex % 2 ? 0.54 : -0.54;
+        const pivot = at(amount, lateral, 0.45 + (rockerIndex % 3) * 0.04);
+        cylinder(
+          `balance-round-pivot-log-${rockerIndex}`,
+          0.31,
+          3.25,
+          pivot,
+          rockerIndex % 2 ? materials.wood : materials.lightWood,
+          { rotationZ: Math.PI / 2, rotationY: yaw, segments: 14, castShadow: true },
+        );
+        const plankSurface = { ...pivot, y: pivot.y + 0.47 };
+        playable(
+          `balance-rocker-plank-${rockerIndex}`,
+          [1.15, 0.24, 2.55],
+          { ...plankSurface, y: plankSurface.y - 0.12 },
+          materials.wood,
+          { rotationY: yaw + (rockerIndex % 2 ? 0.08 : -0.08), castShadow: true },
+        );
+        for (const side of [-1, 1]) {
+          const clampPosition = {
+            x: pivot.x + px * side * 0.46,
+            y: pivot.y + 0.28,
+            z: pivot.z + pz * side * 0.46,
+          };
+          torus(
+            `balance-white-pivot-loop-${rockerIndex}-${side}`,
+            0.36,
+            0.055,
+            clampPosition,
+            whiteRope,
+            { rotationY: yaw + Math.PI / 2, segments: 14, castShadow: true },
+          );
+          const boltPosition = {
+            x: plankSurface.x + ux * side * 0.72,
+            y: plankSurface.y + 0.06,
+            z: plankSurface.z + uz * side * 0.72,
+          };
+          torus(
+            `balance-plank-washer-${rockerIndex}-${side}`,
+            0.11,
+            0.028,
+            boltPosition,
+            materials.steel,
+            { rotationX: Math.PI / 2, segments: 12, castShadow: true },
+          );
+          cylinder(
+            `balance-plank-bolt-${rockerIndex}-${side}`,
+            0.065,
+            0.085,
+            { ...boltPosition, y: boltPosition.y + 0.035 },
+            materials.steel,
+            { segments: 10, castShadow: true },
+          );
+        }
+      }
+      representation.publishedRockerCount = rockerCount;
+      representation.publishedRopeCount = 4 + rockerCount * 2;
+      representation.publishedFastenerCount = rockerCount * 4;
+      representation.detailProfile = "official-photo-matched-eight-timber-rocker-planks-round-log-pivots-white-retaining-loops-four-handlines-braced-gantry-bolts-and-washers";
+      return true;
+    }
     if (template === "progressive-rope-weights") {
       for (let section = 0; section < 6; section += 1) {
         const amount = 0.18 + section * 0.125;
@@ -3560,7 +5218,7 @@
           4,
           origin.y + 0.4,
           yaw,
-          { dynamic: true, object: group },
+          { dynamic: true, object: group, followObjectPlane: true },
         );
         return { group, origin, surface, islandIndex };
       });
@@ -3813,7 +5471,7 @@
         for (const side of [-1, 1]) {
           beam(`hanging-log-disk-rope-${disk}-${side}`, { x: side * 0.38, y: 1.02, z: 0 }, { x: side * 0.38, y: 4.35, z: 0 }, 0.048, whiteRope, { parent: group });
         }
-        const surface = orientedSurface(`${attraction.officialId}-disk-surface-${disk}`, origin, 1.25, 1.25, origin.y + 1.06, yaw, { dynamic: true, object: group });
+        const surface = orientedSurface(`${attraction.officialId}-disk-surface-${disk}`, origin, 1.25, 1.25, origin.y + 1.06, yaw, { dynamic: true, object: group, followObjectPlane: true });
         addAnimation((seconds) => {
           surface.previousX = surface.x;
           surface.previousY = surface.y;
@@ -4059,7 +5717,15 @@
         root.add(group);
         const ball = sphere(`rotating-orange-ball-${ballIndex}`, 1.15, { x: 0, y: 0, z: 0 }, materials.orange, { segments: 14, parent: group });
         beam(`rotating-ball-rope-${ballIndex}`, { x: 0, y: 1.02, z: 0 }, { x: 0, y: 4.7, z: 0 }, 0.075, whiteRope, { parent: group });
-        const surface = orientedSurface(`${attraction.officialId}-rotating-ball-surface-${ballIndex}`, origin, 1.5, 1.5, origin.y + 1.02, yaw, { dynamic: true, object: group });
+        const surface = orientedSurface(`${attraction.officialId}-rotating-ball-surface-${ballIndex}`, origin, 1.5, 1.5, origin.y + 1.02, yaw, {
+          dynamic: true,
+          object: group,
+          heightAt(x, z) {
+            const dx = x - group.position.x;
+            const dz = z - group.position.z;
+            return group.position.y + Math.sqrt(Math.max(0, 1.15 ** 2 - dx * dx - dz * dz));
+          },
+        });
         addAnimation((seconds) => {
           surface.previousX = surface.x;
           surface.previousY = surface.y;
@@ -4141,7 +5807,7 @@
           0.7,
           origin.y + 0.23,
           yaw,
-          { dynamic: true, object: group },
+          { dynamic: true, object: group, followObjectPlane: true },
         );
         return { group, origin, surface, stiltIndex };
       });
@@ -4453,6 +6119,552 @@
       representation.detailProfile = "five-pull-visibly-deforming-black-resistance-belt-to-animated-metal-bell";
       return true;
     }
+    if (template === "transparent-spider-corridor") {
+      const startAmount = 0.12;
+      const endAmount = 0.92;
+      for (const amount of [startAmount, endAmount]) {
+        for (const lateral of [-1.48, 1.48]) {
+          beam(`spider-corridor-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.25), 0.25, materials.wood, { segments: 12, castShadow: true });
+          beam(`spider-corridor-brace-${amount}-${lateral}`, at(amount, lateral, 0.25), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 3.8), 0.15, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`spider-corridor-crossbar-${amount}`, at(amount, -1.72, 4.12), at(amount, 1.72, 4.12), 0.24, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-1.32, 1.32]) {
+        for (let panelIndex = 0; panelIndex < 6; panelIndex += 1) {
+          const amount = 0.18 + panelIndex * 0.135;
+          box(`spider-clear-panel-${lateral}-${panelIndex}`, [0.1, 3.55, Math.max(1.25, length * 0.145)], at(amount, lateral, 2.02), materials.foam, { rotationY: yaw, castShadow: true, solid: true });
+          for (const railHeight of [0.42, 2.03, 3.62]) {
+            beam(`spider-panel-rail-${lateral}-${panelIndex}-${railHeight}`, at(amount - 0.066, lateral, railHeight), at(amount + 0.066, lateral, railHeight), 0.07, materials.wood, { segments: 8, castShadow: true });
+          }
+          sphere(`spider-panel-bolt-${lateral}-${panelIndex}`, 0.07, at(amount, lateral - Math.sign(lateral) * 0.07, 2.03), materials.steel, { segments: 8, castShadow: true });
+        }
+      }
+      orientedSurface(`${attraction.officialId}-spider-body-guide`, at(0.52, 0, 1.02), 0.78, length * 0.72, at(0.52, 0, 1.02).y);
+      rideInteraction("spider-traverse", "透明な両壁に手足を突っ張って進む", at(0.14, 0, 1.02), at(0.91, 0, 1.02), 6_200, null, 1.2, 0.04);
+      representation.bespokePartCount = 58;
+      representation.detailProfile = "official-photo-matched-twin-transparent-polycarbonate-wall-corridor-twelve-panels-timber-rails-bolts-external-a-braces-and-body-pressure-traverse";
+      return true;
+    }
+    if (template === "single-balance-log") {
+      for (const amount of [0.11, 0.93]) {
+        for (const lateral of [-1.62, 1.62]) {
+          beam(`single-log-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 2.45), 0.27, materials.wood, { segments: 12, castShadow: true });
+          beam(`single-log-a-brace-${amount}-${lateral}`, at(amount, lateral, 0.2), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 2.2), 0.15, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`single-log-end-rail-${amount}`, at(amount, -1.82, 2.25), at(amount, 1.82, 2.25), 0.23, materials.wood, { segments: 12, castShadow: true });
+      }
+      const mainLog = beam("single-full-round-log", at(0.13, 0, 0.58), at(0.92, 0, 0.58), 0.34, materials.lightWood, { segments: 16, castShadow: true });
+      const mainLogBaseRotationZ = mainLog.rotation.z;
+      for (const amount of [0.15, 0.9]) {
+        for (const lateral of [-0.34, 0.34]) {
+          beam(`single-log-end-chain-${amount}-${lateral}`, at(amount, lateral, 0.58), at(amount, lateral * 3.9, 1.95), 0.055, materials.steel, { segments: 8, castShadow: true });
+          torus(`single-log-eye-${amount}-${lateral}`, 0.15, 0.045, at(amount, lateral, 0.61), materials.steel, { rotationX: Math.PI / 2, segments: 12, castShadow: true });
+        }
+      }
+      for (let plankIndex = 0; plankIndex < 8; plankIndex += 1) {
+        const amount = plankIndex < 4 ? 0.075 : 0.965;
+        const lateral = ((plankIndex % 4) - 1.5) * 0.7;
+        playable(`single-log-landing-plank-${plankIndex}`, [0.62, 0.18, 1.1], at(amount, lateral, -0.09), materials.lightWood, { rotationY: yaw, castShadow: true });
+        sphere(`single-log-deck-bolt-${plankIndex}`, 0.07, at(amount, lateral, 0.04), materials.steel, { segments: 8, castShadow: true });
+      }
+      orientedSurface(`${attraction.officialId}-single-log-top`, at(0.52, 0, 0.91), 0.7, length * 0.76, at(0.52, 0, 0.91).y);
+      addAnimation((seconds) => { mainLog.rotation.z = mainLogBaseRotationZ + Math.sin(seconds * 0.72 + index) * 0.028; });
+      rideInteraction("balance-log", "揺れる一本丸太を駆け抜ける", at(0.13, 0, 0.92), at(0.92, 0, 0.92), 5_000, null, 1.2, 0.06);
+      representation.bespokePartCount = 35;
+      representation.detailProfile = "official-photo-matched-single-full-round-timber-balance-log-end-chains-eyelets-side-frame-landings-and-subtle-roll";
+      return true;
+    }
+    if (template === "infinite-hanging-rings") {
+      for (const amount of [0.08, 0.95]) {
+        for (const lateral of [-2.65, 2.65]) {
+          beam(`infinite-ring-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.35), 0.27, materials.wood, { segments: 12, castShadow: true });
+          beam(`infinite-ring-brace-${amount}-${lateral}`, at(amount, lateral, 0.4), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 4.8), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`infinite-ring-crossbar-${amount}`, at(amount, -2.9, 5.22), at(amount, 2.9, 5.22), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-2.05, -0.68, 0.68, 2.05]) beam(`infinite-ring-top-rail-${lateral}`, at(0.08, lateral, 5.15), at(0.95, lateral, 5.15), 0.2, materials.wood, { segments: 12, castShadow: true });
+      const ringCount = 20;
+      for (let ringIndex = 0; ringIndex < ringCount; ringIndex += 1) {
+        const row = ringIndex % 4;
+        const column = Math.floor(ringIndex / 4);
+        const amount = 0.16 + column * 0.165 + (row % 2) * 0.025;
+        const lateral = (row - 1.5) * 1.32 + (column % 2 ? 0.18 : -0.18);
+        const center = at(amount, lateral, 2.45 + ((ringIndex * 7) % 4) * 0.23);
+        const hangerTop = at(amount, lateral, 5.1);
+        beam(`infinite-ring-hanger-${ringIndex}`, { ...center, y: center.y + 0.62 }, hangerTop, 0.06, whiteRope, { segments: 10, castShadow: true });
+        const ring = torus(`infinite-silver-ring-${ringIndex}`, 0.52, 0.095, center, materials.steel, { rotationY: yaw + Math.PI / 2, segments: 18, castShadow: true });
+        sphere(`infinite-ring-knot-${ringIndex}`, 0.11, { ...center, y: center.y + 0.62 }, whiteRope, { segments: 9, castShadow: true });
+        const baseRotationZ = ring.rotation.z;
+        addAnimation((seconds) => { ring.rotation.z = baseRotationZ + Math.sin(seconds * (0.72 + ringIndex * 0.012) + ringIndex) * 0.14; });
+      }
+      rideInteraction("ring-traverse", "不規則な無限の輪を選んで渡る", at(0.11, 0, 2.55), at(0.93, 0, 2.55), 7_200, null, 0.42, 0.25);
+      representation.publishedRingCount = ringCount;
+      representation.bespokePartCount = 74;
+      representation.detailProfile = "official-photo-matched-twenty-irregular-silver-rings-four-staggered-rows-individual-white-rope-hangers-knots-heavy-timber-canopy-and-independent-sway";
+      return true;
+    }
+    if (template === "long-water-monkey-bars") {
+      for (const amount of [0.07, 0.96]) {
+        for (const lateral of [-1.78, 1.78]) {
+          beam(`water-monkey-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.72), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`water-monkey-brace-${amount}-${lateral}`, at(amount, lateral, 0.45), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 4.25), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`water-monkey-crossbar-${amount}`, at(amount, -2.02, 4.55), at(amount, 2.02, 4.55), 0.26, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-1.36, 1.36]) beam(`water-monkey-long-rail-${lateral}`, at(0.07, lateral, 4.42), at(0.96, lateral, 4.42), 0.21, materials.wood, { segments: 14, castShadow: true });
+      const rungCount = 24;
+      for (let rungIndex = 0; rungIndex < rungCount; rungIndex += 1) {
+        const amount = 0.1 + rungIndex / (rungCount - 1) * 0.83;
+        beam(`water-monkey-silver-rung-${rungIndex}`, at(amount, -1.35, 4.38), at(amount, 1.35, 4.38), 0.085, materials.steel, { segments: 12, castShadow: true });
+        if (rungIndex % 3 === 0) sphere(`water-monkey-rung-bolt-${rungIndex}`, 0.07, at(amount, -1.38, 4.38), materials.steel, { segments: 8, castShadow: true });
+      }
+      for (let restPlank = 0; restPlank < 7; restPlank += 1) playable(`water-monkey-rest-plank-${restPlank}`, [0.62, 0.16, 1.25], at(0.5, (restPlank - 3) * 0.53, 1.08), materials.lightWood, { rotationY: yaw, castShadow: true });
+      rideInteraction("monkey-traverse", "長い水上うんていを腕だけで進む", at(0.08, 0, 3.65), at(0.95, 0, 3.65), 7_800, null, 0.45, 0.2);
+      representation.publishedRungCount = rungCount;
+      representation.bespokePartCount = 51;
+      representation.detailProfile = "official-photo-matched-twenty-four-silver-rung-long-water-monkey-bars-four-post-timber-frame-central-seven-plank-rest-deck-and-fasteners";
+      return true;
+    }
+    if (template === "triple-hammock-gates") {
+      for (const amount of [0.08, 0.37, 0.66, 0.95]) {
+        for (const lateral of [-2.1, 2.1]) beam(`hammock-gate-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.65), 0.27, materials.wood, { segments: 12, castShadow: true });
+        beam(`hammock-gate-top-cross-${amount}`, at(amount, -2.35, 4.55), at(amount, 2.35, 4.55), 0.24, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (let panelIndex = 0; panelIndex < 3; panelIndex += 1) {
+        const amount = 0.225 + panelIndex * 0.29;
+        const ringCenter = at(amount, 0, 2.3 - (panelIndex % 2) * 0.18);
+        const opening = torus(`hammock-round-opening-${panelIndex}`, 0.86, 0.1, ringCenter, whiteRope, { rotationY: yaw + Math.PI / 2, segments: 20, castShadow: true });
+        const openingBaseRotationZ = opening.rotation.z;
+        for (let row = 0; row < 7; row += 1) {
+          const y = 0.45 + row * 0.57;
+          const sag = Math.sin(row / 6 * Math.PI) * 0.55;
+          beam(`hammock-panel-${panelIndex}-row-${row}`, at(amount, -1.95, y), at(amount, 1.95, y - sag), 0.052, whiteRope, { segments: 8, castShadow: true });
+        }
+        for (let column = 0; column < 9; column += 1) {
+          const lateral = -1.9 + column * 0.475;
+          const sag = Math.cos((column - 4) / 4 * Math.PI / 2) * 0.62;
+          beam(`hammock-panel-${panelIndex}-column-${column}`, at(amount, lateral, 0.35), at(amount, lateral, 4.35 - sag), 0.052, whiteRope, { segments: 8, castShadow: true });
+        }
+        addAnimation((seconds) => { opening.rotation.z = openingBaseRotationZ + Math.sin(seconds * 0.78 + panelIndex) * 0.08; });
+      }
+      rideInteraction("hammock-crawl", "3枚の丸穴ハンモックをくぐる", at(0.1, 0, 1.25), at(0.93, 0, 1.25), 7_000, null, 1.2, 0.18);
+      representation.publishedHammockGateCount = 3;
+      representation.bespokePartCount = 60;
+      representation.detailProfile = "official-photo-matched-three-deep-sagging-white-rope-hammock-walls-three-round-body-openings-dense-knotted-grids-and-four-bay-timber-frame";
+      return true;
+    }
+    if (template === "twin-ninja-pull-boards") {
+      for (const amount of [0.08, 0.95]) {
+        for (const lateral of [-2.45, 2.45]) beam(`ninja-pull-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.45), 0.27, materials.wood, { segments: 12, castShadow: true });
+        beam(`ninja-pull-frame-cross-${amount}`, at(amount, -2.7, 4.32), at(amount, 2.7, 4.32), 0.24, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("ninja-pull-center-line", at(0.08, 0, 2.12), at(0.95, 0, 2.12), 0.09, whiteRope, { segments: 10, castShadow: true });
+      const boardPieces = [];
+      for (const boardSide of [-1, 1]) {
+        const amount = boardSide < 0 ? 0.36 : 0.66;
+        const lateral = boardSide * 0.72;
+        const pieceOffsets = [
+          [-0.66, -0.52, 0.7, 0.22], [0, -0.52, 0.7, 0.22], [0.66, -0.52, 0.7, 0.22],
+          [-0.66, 0, 0.22, 0.82], [0.66, 0, 0.22, 0.82],
+          [-0.66, 0.52, 0.7, 0.22], [0, 0.52, 0.7, 0.22], [0.66, 0.52, 0.7, 0.22],
+        ];
+        const pieces = pieceOffsets.map(([offsetX, offsetZ, pieceWidth, pieceDepth], pieceIndex) => {
+          const origin = at(amount + offsetZ / Math.max(length, 1), lateral + offsetX, 0.42);
+          const piece = playable(`ninja-hole-board-${boardSide}-${pieceIndex}`, [pieceWidth, 0.22, pieceDepth], { ...origin, y: origin.y - 0.11 }, materials.lightWood, { rotationY: yaw, dynamic: true, castShadow: true });
+          return { piece, origin: { ...piece.mesh.position } };
+        });
+        boardPieces.push(...pieces);
+        for (const corner of [-1, 1]) {
+          const anchor = at(amount, lateral + corner * 0.92, 0.45);
+          beam(`ninja-board-side-rope-${boardSide}-${corner}`, anchor, at(boardSide < 0 ? 0.08 : 0.95, lateral + corner * 1.45, 2.05), 0.065, whiteRope, { segments: 10, castShadow: true });
+          torus(`ninja-board-eye-${boardSide}-${corner}`, 0.14, 0.045, anchor, materials.steel, { rotationX: Math.PI / 2, segments: 12, castShadow: true });
+        }
+      }
+      boardPieces.forEach(({ piece, origin }, pieceIndex) => addAnimation((seconds) => {
+        piece.surface.previousX = piece.surface.x;
+        piece.surface.previousY = piece.surface.y;
+        piece.surface.previousZ = piece.surface.z;
+        const wave = Math.sin(seconds * 0.82 + Math.floor(pieceIndex / 8) * 2.4);
+        piece.mesh.position.x = origin.x + px * wave * 0.15;
+        piece.mesh.position.z = origin.z + pz * wave * 0.15;
+        piece.mesh.position.y = origin.y + Math.sin(seconds * 1.08 + Math.floor(pieceIndex / 8)) * 0.1;
+        piece.mesh.rotation.z = wave * 0.055;
+        piece.surface.x = piece.mesh.position.x;
+        piece.surface.y = piece.mesh.position.y + 0.11;
+        piece.surface.z = piece.mesh.position.z;
+      }));
+      rideInteraction("ninja-pull", "2枚の足場を手繰り寄せて忍者渡り", at(0.12, -0.72, 0.72), at(0.91, 0.72, 0.72), 6_400, null, 1.2, 0.14);
+      representation.publishedMovingPlatformCount = 2;
+      representation.bespokePartCount = 31;
+      representation.detailProfile = "official-photo-and-instructions-matched-exactly-two-independent-square-hole-timber-foot-boards-side-pull-ropes-central-traverse-line-eyelets-and-coupled-sway";
+      return true;
+    }
+    if (template === "three-choice-parallel-logs") {
+      const lanes = [-1.38, 0, 1.38];
+      for (const lane of lanes) {
+        beam(`choice-log-${lane}`, at(0.13, lane, 0.52 + (lane === 0 ? 0.08 : 0)), at(0.92, lane, 0.52 + (lane === 0 ? 0.08 : 0)), lane === 0 ? 0.36 : 0.31, lane === 0 ? materials.lightWood : materials.wood, { segments: 16, castShadow: true });
+        orientedSurface(`${attraction.officialId}-choice-log-top-${lane}`, at(0.52, lane, 0.86 + (lane === 0 ? 0.08 : 0)), lane === 0 ? 0.7 : 0.62, length * 0.76, at(0.52, lane, 0.86 + (lane === 0 ? 0.08 : 0)).y);
+        for (const amount of [0.13, 0.39, 0.66, 0.92]) {
+          beam(`choice-log-support-${lane}-${amount}`, at(amount, lane, 0), at(amount, lane, 0.48), 0.21, materials.wood, { segments: 10, castShadow: true });
+          torus(`choice-log-collar-${lane}-${amount}`, lane === 0 ? 0.38 : 0.33, 0.042, at(amount, lane, 0.53 + (lane === 0 ? 0.08 : 0)), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+          sphere(`choice-log-bolt-${lane}-${amount}`, 0.06, at(amount, lane - (lane >= 0 ? 0.31 : -0.31), 0.55), materials.steel, { segments: 8, castShadow: true });
+        }
+      }
+      for (const amount of [0.09, 0.96]) beam(`choice-log-end-cross-${amount}`, at(amount, -1.85, 0.15), at(amount, 1.85, 0.15), 0.2, materials.darkWood, { segments: 12, castShadow: true });
+      representation.publishedChoiceCount = 3;
+      representation.bespokePartCount = 41;
+      representation.detailProfile = "official-photo-matched-three-long-parallel-round-timber-choice-logs-center-lane-slightly-higher-twelve-water-posts-steel-collars-and-visible-bolts";
+      return true;
+    }
+    if (template === "eight-padded-floating-islands") {
+      const islandLayouts = [
+        [0.17, -1.25], [0.27, 1.15], [0.39, -1.05], [0.5, 1.22],
+        [0.61, -1.2], [0.72, 1.05], [0.82, -1.08], [0.91, 1.15],
+      ];
+      const islands = islandLayouts.map(([amount, lateral], islandIndex) => {
+        const center = at(amount, lateral, 0.22);
+        const pad = playable(`padded-island-top-${islandIndex}`, [2.25, 0.34, 1.62], { ...center, y: center.y - 0.17 }, materials.teal, { rotationY: yaw, dynamic: true, castShadow: true });
+        const base = box(`padded-island-foam-base-${islandIndex}`, [2.12, 0.48, 1.48], { ...center, y: center.y - 0.47 }, materials.foam, { rotationY: yaw, castShadow: true });
+        const hardware = [];
+        for (const sideX of [-1, 1]) for (const sideZ of [-1, 1]) {
+          const bolt = sphere(`padded-island-bolt-${islandIndex}-${sideX}-${sideZ}`, 0.065, at(amount + sideZ * 0.028, lateral + sideX * 0.98, 0.21), materials.steel, { segments: 8, castShadow: true });
+          hardware.push(bolt);
+        }
+        for (const ropeSide of [-1, 1]) beam(`padded-island-tether-${islandIndex}-${ropeSide}`, at(amount, lateral + ropeSide * 1.03, 0.08), at(amount + (islandIndex % 2 ? 0.04 : -0.04), lateral + ropeSide * 1.52, 0.08), 0.052, whiteRope, { segments: 8, castShadow: true });
+        return { pad, base, hardware, center, baseOrigin: { ...base.position }, hardwareOrigins: hardware.map((mesh) => ({ ...mesh.position })) };
+      });
+      islands.forEach((island, islandIndex) => addAnimation((seconds) => {
+        const waveX = Math.sin(seconds * 0.71 + islandIndex * 0.8) * 0.14;
+        const waveY = Math.sin(seconds * 1.12 + islandIndex) * 0.12;
+        island.pad.surface.previousX = island.pad.surface.x;
+        island.pad.surface.previousY = island.pad.surface.y;
+        island.pad.mesh.position.x = island.center.x + px * waveX;
+        island.pad.mesh.position.z = island.center.z + pz * waveX;
+        island.pad.mesh.position.y = island.center.y - 0.17 + waveY;
+        island.pad.mesh.rotation.z = Math.sin(seconds * 0.83 + islandIndex) * 0.07;
+        island.pad.surface.x = island.pad.mesh.position.x;
+        island.pad.surface.z = island.pad.mesh.position.z;
+        island.pad.surface.y = island.pad.mesh.position.y + 0.17;
+        island.base.position.set(island.baseOrigin.x + px * waveX, island.baseOrigin.y + waveY, island.baseOrigin.z + pz * waveX);
+        island.hardware.forEach((mesh, hardwareIndex) => {
+          const origin = island.hardwareOrigins[hardwareIndex];
+          mesh.position.set(origin.x + px * waveX, origin.y + waveY, origin.z + pz * waveX);
+        });
+      }));
+      representation.publishedIslandCount = 8;
+      representation.bespokePartCount = 64;
+      representation.detailProfile = "official-photo-matched-eight-staggered-two-row-rectangular-floating-islands-green-waterproof-cushions-foam-bases-eyelet-bolts-tethers-and-independent-bob-roll";
+      return true;
+    }
+    if (template === "double-pulley-ball-slider") {
+      for (const amount of [0.08, 0.96]) {
+        for (const lateral of [-2.15, 2.15]) {
+          beam(`double-ball-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.7), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`double-ball-brace-${amount}-${lateral}`, at(amount, lateral, 0.45), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 5.1), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`double-ball-crossbar-${amount}`, at(amount, -2.42, 5.55), at(amount, 2.42, 5.55), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      let rideBall = null;
+      let rideStart = null;
+      let rideEnd = null;
+      for (const lane of [-1.25, 1.25]) {
+        const cableFrom = at(0.1, lane, 5.28);
+        const cableTo = at(0.93, lane, 2.55);
+        beam(`double-ball-black-cable-${lane}`, cableFrom, cableTo, 0.075, materials.black, { segments: 10, castShadow: true });
+        const ballStart = { ...cableFrom, y: cableFrom.y - 1.72 };
+        const ballEnd = { ...cableTo, y: cableTo.y - 1.72 };
+        const ball = sphere(`double-ball-orange-grip-${lane}`, 0.42, ballStart, materials.orange, { scaleY: 1.04, segments: 18, castShadow: true });
+        const trolley = box(`double-ball-red-trolley-${lane}`, [0.42, 0.25, 0.28], { ...cableFrom, y: cableFrom.y - 0.05 }, materials.red, { rotationY: yaw, castShadow: true });
+        for (const wheelSide of [-1, 1]) torus(`double-ball-pulley-wheel-${lane}-${wheelSide}`, 0.16, 0.055, { ...cableFrom, y: cableFrom.y + wheelSide * 0.03 }, materials.orange, { rotationX: Math.PI / 2, segments: 14, castShadow: true });
+        beam(`double-ball-upper-white-rope-${lane}`, { ...cableFrom, y: cableFrom.y - 0.18 }, { ...ballStart, y: ballStart.y + 0.38 }, 0.075, whiteRope, { segments: 10, castShadow: true });
+        beam(`double-ball-lower-white-rope-${lane}`, { ...ballStart, y: ballStart.y - 0.38 }, { ...ballStart, y: ballStart.y - 1.08 }, 0.07, whiteRope, { segments: 10, castShadow: true });
+        sphere(`double-ball-upper-knot-${lane}`, 0.12, { ...ballStart, y: ballStart.y + 0.42 }, whiteRope, { segments: 9, castShadow: true });
+        sphere(`double-ball-lower-knot-${lane}`, 0.12, { ...ballStart, y: ballStart.y - 0.82 }, whiteRope, { segments: 9, castShadow: true });
+        for (let spring = 0; spring < 6; spring += 1) torus(`double-ball-tension-spring-${lane}-${spring}`, 0.12, 0.035, at(0.11 + spring * 0.018, lane, 5.3), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 10, castShadow: true });
+        addAnimation((seconds) => {
+          if (lane < 0 && gameplay.ride?.id === `official-${attraction.officialId}-ball-slider`) return;
+          const amount = (Math.sin(seconds * 0.58 + lane + index) + 1) / 2;
+          ball.position.set(lerp(ballStart.x, ballEnd.x, amount), lerp(ballStart.y, ballEnd.y, amount), lerp(ballStart.z, ballEnd.z, amount));
+          trolley.position.set(lerp(cableFrom.x, cableTo.x, amount), lerp(cableFrom.y, cableTo.y, amount), lerp(cableFrom.z, cableTo.z, amount));
+        });
+        if (lane < 0) { rideBall = ball; rideStart = ballStart; rideEnd = ballEnd; }
+      }
+      rideInteraction("ball-slider", `${attraction.name}につかまる`, rideStart, rideEnd, 3_200, rideBall, 0, 1.05);
+      representation.publishedLaneCount = 2;
+      representation.bespokePartCount = 42;
+      representation.detailProfile = "official-photo-matched-two-black-zip-cables-red-trolleys-orange-pulley-wheels-six-coil-tensioners-small-orange-grip-balls-upper-lower-white-ropes-and-knots";
+      return true;
+    }
+    if (template === "one-point-two-sumo-stage") {
+      const stage = at(0.62, 0, 0.18);
+      cylinder("sumo-exact-stage", 0.6, 0.2, stage, materials.coral, { segments: 32, castShadow: true });
+      torus("sumo-white-boundary", 0.51, 0.035, { ...stage, y: stage.y + 0.12 }, materials.white, { rotationX: Math.PI / 2, segments: 32, castShadow: true });
+      for (let skirt = 0; skirt < 12; skirt += 1) {
+        const angle = skirt / 12 * Math.PI * 2;
+        box(`sumo-skirt-pad-${skirt}`, [0.22, 0.18, 0.12], { x: stage.x + Math.cos(angle) * 0.56, y: stage.y - 0.12, z: stage.z + Math.sin(angle) * 0.56 }, materials.darkWood, { rotationY: -angle, castShadow: true });
+        sphere(`sumo-skirt-bolt-${skirt}`, 0.045, { x: stage.x + Math.cos(angle) * 0.62, y: stage.y - 0.08, z: stage.z + Math.sin(angle) * 0.62 }, materials.steel, { segments: 8, castShadow: true });
+      }
+      for (let support = 0; support < 4; support += 1) {
+        const angle = support / 4 * Math.PI * 2 + Math.PI / 4;
+        cylinder(`sumo-under-post-${support}`, 0.12, 0.52, { x: stage.x + Math.cos(angle) * 0.38, y: stage.y - 0.35, z: stage.z + Math.sin(angle) * 0.38 }, materials.wood, { segments: 10, castShadow: true });
+      }
+      cylinder("sumo-center-logo-white", 0.13, 0.018, { ...stage, y: stage.y + 0.12 }, materials.white, { segments: 18, castShadow: true });
+      cylinder("sumo-center-logo-lime", 0.075, 0.022, { ...stage, y: stage.y + 0.135 }, materials.lime, { segments: 14, castShadow: true });
+      for (const lateral of [-0.95, 0.95]) playable(`sumo-green-access-pad-${lateral}`, [1.15, 0.28, 0.82], at(0.62, lateral, -0.12), materials.teal, { rotationY: yaw, castShadow: true });
+      orientedSurface(`${attraction.officialId}-sumo-exact-surface`, stage, 1.16, 1.16, stage.y + 0.12, 0);
+      const opponentBody = box("sumo-opponent-body", [0.34, 0.82, 0.3], { x: stage.x + px * 0.2, y: stage.y + 0.72, z: stage.z + pz * 0.2 }, materials.orange, { castShadow: true });
+      sphere("sumo-opponent-head", 0.18, { x: opponentBody.position.x, y: stage.y + 1.28, z: opponentBody.position.z }, materials.orange, { segments: 10, castShadow: true });
+      const opponentOrigin = { ...opponentBody.position };
+      representation.interactive = true;
+      registerInteraction({
+        id: `official-${attraction.officialId}-sumo`, label: "手押しどすこい：E連打で押す", point: { ...stage, y: stage.y + 0.12 }, radius: 4.2, areaId: attraction.areaId,
+        activate() {
+          representation.sumoPushes = (representation.sumoPushes || 0) + 1;
+          opponentBody.position.x += px * 0.09;
+          opponentBody.position.z += pz * 0.09;
+          if (representation.sumoPushes >= 5) {
+            handle.notify?.("💥 直径1.2mの土俵から押し出した！");
+            playTone(700, 0.22, "triangle");
+            representation.sumoPushes = 0;
+            opponentBody.position.set(opponentOrigin.x, opponentOrigin.y, opponentOrigin.z);
+          } else playTone(250 + representation.sumoPushes * 45, 0.07, "square");
+          return true;
+        },
+      });
+      representation.publishedDiameterMeters = 1.2;
+      representation.bespokePartCount = 37;
+      representation.detailProfile = "official-photo-and-published-dimension-matched-1.2m-red-brown-round-padded-sumo-stage-white-boundary-center-mark-twelve-skirt-brackets-bolts-four-post-base-and-green-access-pads";
+      return true;
+    }
+    if (template === "dual-difficulty-jump-islands") {
+      for (const amount of [0.08, 0.95]) for (const lateral of [-2.25, 2.25]) beam(`jump-island-frame-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.35), 0.27, materials.wood, { segments: 12, castShadow: true });
+      for (const amount of [0.08, 0.95]) beam(`jump-island-frame-cross-${amount}`, at(amount, -2.5, 4.25), at(amount, 2.5, 4.25), 0.24, materials.wood, { segments: 12, castShadow: true });
+      const layouts = [[0.53, -1.28, 0], [0.39, 1.28, 1], [0.7, 1.28, 1]];
+      const islandEntries = layouts.map(([amount, lateral, lane], islandIndex) => {
+        const center = at(amount, lateral, 0.24);
+        const pad = playable(`jump-island-pad-${islandIndex}`, [2.15, 0.34, 1.7], { ...center, y: center.y - 0.17 }, materials.teal, { rotationY: yaw, dynamic: true, castShadow: true });
+        const base = box(`jump-island-base-${islandIndex}`, [2.02, 0.48, 1.56], { ...center, y: center.y - 0.46 }, materials.wood, { rotationY: yaw, castShadow: true });
+        const parts = [base];
+        for (const sideX of [-1, 1]) for (const sideZ of [-1, 1]) parts.push(sphere(`jump-island-bolt-${islandIndex}-${sideX}-${sideZ}`, 0.06, at(amount + sideZ * 0.03, lateral + sideX * 0.92, 0.22), materials.steel, { segments: 8, castShadow: true }));
+        for (const ropeSide of [-1, 1]) beam(`jump-island-mooring-${islandIndex}-${ropeSide}`, at(amount, lateral + ropeSide * 0.98, 0.08), at(amount + (lane ? 0.05 : -0.05), lateral + ropeSide * 1.48, 0.08), 0.05, whiteRope, { segments: 8, castShadow: true });
+        const verticalBottom = at(amount, lateral, 1.05);
+        beam(`jump-island-vertical-rope-${islandIndex}`, verticalBottom, at(amount, lateral, 4.2), 0.075, whiteRope, { segments: 10, castShadow: true });
+        sphere(`jump-island-rope-knot-${islandIndex}`, 0.12, verticalBottom, whiteRope, { segments: 9, castShadow: true });
+        return { pad, parts, origins: parts.map((mesh) => ({ ...mesh.position })), center, islandIndex };
+      });
+      islandEntries.forEach((entry) => addAnimation((seconds) => {
+        const waveX = Math.sin(seconds * 0.66 + entry.islandIndex * 1.7) * 0.12;
+        const waveY = Math.sin(seconds * 1.04 + entry.islandIndex) * 0.11;
+        entry.pad.surface.previousX = entry.pad.surface.x;
+        entry.pad.surface.previousY = entry.pad.surface.y;
+        entry.pad.mesh.position.x = entry.center.x + px * waveX;
+        entry.pad.mesh.position.z = entry.center.z + pz * waveX;
+        entry.pad.mesh.position.y = entry.center.y - 0.17 + waveY;
+        entry.pad.mesh.rotation.z = Math.sin(seconds * 0.8 + entry.islandIndex) * 0.07;
+        entry.pad.surface.x = entry.pad.mesh.position.x;
+        entry.pad.surface.z = entry.pad.mesh.position.z;
+        entry.pad.surface.y = entry.pad.mesh.position.y + 0.17;
+        entry.parts.forEach((mesh, partIndex) => { const origin = entry.origins[partIndex]; mesh.position.set(origin.x + px * waveX, origin.y + waveY, origin.z + pz * waveX); });
+      }));
+      representation.publishedDifficultyRoutes = Object.freeze([{ islands: 1, level: 3 }, { islands: 2, level: 2 }]);
+      representation.bespokePartCount = 37;
+      representation.detailProfile = "official-photo-and-instructions-matched-two-difficulty-lanes-one-island-hard-two-island-normal-three-green-padded-pontoons-moorings-vertical-ropes-and-independent-bob";
+      return true;
+    }
+    if (template === "direct-hang-sloth-log") {
+      for (const amount of [0.1, 0.92]) {
+        for (const lateral of [-1.55, 1.55]) {
+          beam(`direct-sloth-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 3.65), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`direct-sloth-brace-${amount}-${lateral}`, at(amount, lateral, 0.35), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 3.25), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`direct-sloth-end-cross-${amount}`, at(amount, -1.8, 3.52), at(amount, 1.8, 3.52), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("direct-sloth-bare-log", at(0.11, 0, 3.42), at(0.92, 0, 3.42), 0.34, materials.lightWood, { segments: 16, castShadow: true });
+      for (const amount of [0.12, 0.24, 0.36, 0.48, 0.6, 0.72, 0.84, 0.91]) {
+        torus(`direct-sloth-steel-collar-${amount}`, 0.36, 0.042, at(amount, 0, 3.42), materials.steel, { rotationY: yaw + Math.PI / 2, segments: 12, castShadow: true });
+        sphere(`direct-sloth-collar-bolt-${amount}`, 0.055, at(amount, -0.34, 3.42), materials.steel, { segments: 8, castShadow: true });
+      }
+      for (let landingPlank = 0; landingPlank < 8; landingPlank += 1) {
+        const amount = landingPlank < 4 ? 0.07 : 0.97;
+        const lateral = ((landingPlank % 4) - 1.5) * 0.62;
+        playable(`direct-sloth-landing-${landingPlank}`, [0.54, 0.16, 1], at(amount, lateral, 0.12), materials.lightWood, { rotationY: yaw, castShadow: true });
+      }
+      rideInteraction("direct-hang", "太丸太に直接ぶら下がって進む", at(0.11, 0, 2.62), at(0.92, 0, 2.62), 6_200, null, 0.42, 0.16);
+      representation.publishedAddedGripCount = 0;
+      representation.bespokePartCount = 35;
+      representation.detailProfile = "official-photo-matched-single-bare-horizontal-round-log-direct-hand-grip-no-invented-holds-four-post-frame-eight-steel-collars-bolts-and-landing-planks";
+      return true;
+    }
+    if (template === "dual-height-water-tightropes") {
+      for (const amount of [0.08, 0.95]) {
+        for (const lateral of [-2.15, 2.15]) {
+          beam(`dual-tightrope-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.35), 0.27, materials.wood, { segments: 12, castShadow: true });
+          beam(`dual-tightrope-brace-${amount}-${lateral}`, at(amount, lateral, 0.35), at(amount + (amount < 0.5 ? 0.11 : -0.11), lateral, 3.9), 0.15, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`dual-tightrope-cross-${amount}`, at(amount, -2.42, 4.22), at(amount, 2.42, 4.22), 0.24, materials.wood, { segments: 12, castShadow: true });
+      }
+      const laneData = [{ lateral: -1.05, footY: 0.45, level: 2, suffix: "low" }, { lateral: 1.05, footY: 1.05, level: 3, suffix: "high" }];
+      laneData.forEach(({ lateral, footY, level, suffix }, laneIndex) => {
+        beam(`dual-tightrope-red-foot-${suffix}`, at(0.1, lateral, footY), at(0.93, lateral, footY), 0.085, materials.red, { segments: 10, castShadow: true });
+        beam(`dual-tightrope-black-overhead-${suffix}`, at(0.09, lateral, 4.08), at(0.94, lateral, 4.08), 0.065, materials.black, { segments: 10, castShadow: true });
+        const trolleyOrigin = at(0.28 + laneIndex * 0.12, lateral, 4.02);
+        const trolley = box(`dual-tightrope-orange-trolley-${suffix}`, [0.38, 0.24, 0.28], trolleyOrigin, materials.orange, { rotationY: yaw, castShadow: true });
+        const wheels = [-1, 1].map((wheelSide) => torus(`dual-tightrope-pulley-${suffix}-${wheelSide}`, 0.15, 0.05, { ...trolleyOrigin, y: trolleyOrigin.y + wheelSide * 0.03 }, materials.red, { rotationX: Math.PI / 2, segments: 14, castShadow: true }));
+        const gripCenter = at(0.28 + laneIndex * 0.12, lateral, footY + 1.18);
+        const hanger = beam(`dual-tightrope-white-hanger-${suffix}`, gripCenter, { ...trolleyOrigin, y: trolleyOrigin.y - 0.12 }, 0.065, whiteRope, { segments: 10, castShadow: true });
+        const balanceBar = beam(`dual-tightrope-balance-bar-${suffix}`, { x: gripCenter.x + px * -0.58, y: gripCenter.y, z: gripCenter.z + pz * -0.58 }, { x: gripCenter.x + px * 0.58, y: gripCenter.y, z: gripCenter.z + pz * 0.58 }, 0.08, materials.lightWood, { segments: 12, castShadow: true });
+        beam(`dual-tightrope-pullback-line-${suffix}`, at(0.09, lateral + (lateral < 0 ? -0.42 : 0.42), 1.75), gripCenter, 0.05, whiteRope, { segments: 8, castShadow: true });
+        sphere(`dual-tightrope-hanger-knot-${suffix}`, 0.11, gripCenter, whiteRope, { segments: 9, castShadow: true });
+        const moveParts = [trolley, ...wheels, hanger, balanceBar];
+        const origins = moveParts.map((mesh) => ({ ...mesh.position }));
+        addAnimation((seconds) => {
+          const travel = (Math.sin(seconds * 0.38 + laneIndex * Math.PI) + 1) * 0.5;
+          const delta = (travel - (0.28 + laneIndex * 0.12)) * length * 0.56;
+          moveParts.forEach((mesh, partIndex) => {
+            const origin = origins[partIndex];
+            mesh.position.set(origin.x + ux * delta, origin.y, origin.z + uz * delta);
+          });
+        });
+        orientedSurface(`${attraction.officialId}-tightrope-${suffix}-guide`, at(0.52, lateral, footY + 0.1), 0.34, length * 0.78, at(0.52, lateral, footY + 0.1).y);
+        rideInteraction(`tightrope-${suffix}`, `水上綱渡り ${level === 2 ? "低い難易度2" : "高い難易度3"}`, at(0.1, lateral, footY + 0.1), at(0.93, lateral, footY + 0.1), level === 2 ? 6_200 : 7_000, null, 1.2, 0.14);
+      });
+      representation.publishedHeightRoutes = Object.freeze([{ level: 2, height: "low" }, { level: 3, height: "high" }]);
+      representation.bespokePartCount = 32;
+      representation.detailProfile = "official-photo-and-instructions-matched-low-level2-high-level3-red-foot-ropes-black-overhead-cables-red-orange-pulleys-pullable-white-lines-and-moving-balance-bars";
+      return true;
+    }
+    if (template === "basket-net-swings") {
+      for (const amount of [0.07, 0.96]) {
+        for (const lateral of [-2.45, 2.45]) {
+          beam(`basket-swing-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.15), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`basket-swing-a-brace-${amount}-${lateral}`, at(amount, lateral, 0.4), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.65), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`basket-swing-crossbar-${amount}`, at(amount, -2.7, 5.02), at(amount, 2.7, 5.02), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-1.55, 1.55]) beam(`basket-swing-overhead-${lateral}`, at(0.07, lateral, 4.92), at(0.96, lateral, 4.92), 0.21, materials.wood, { segments: 12, castShadow: true });
+      const basketCount = 4;
+      for (let basketIndex = 0; basketIndex < basketCount; basketIndex += 1) {
+        const amount = 0.2 + basketIndex * 0.2;
+        const lateral = basketIndex % 2 ? 0.3 : -0.3;
+        const center = at(amount, lateral, 1.2);
+        const movingParts = [];
+        const corners = [
+          [-0.72, -0.62, 0.72, -0.62], [0.72, -0.62, 0.72, 0.62],
+          [0.72, 0.62, -0.72, 0.62], [-0.72, 0.62, -0.72, -0.62],
+        ];
+        corners.forEach(([x1, z1, x2, z2], edgeIndex) => movingParts.push(beam(`basket-steel-frame-${basketIndex}-${edgeIndex}`, at(amount + z1 / length, lateral + x1, 1.2), at(amount + z2 / length, lateral + x2, 1.2), 0.075, materials.steel, { segments: 10, castShadow: true })));
+        for (let line = 0; line < 5; line += 1) {
+          const offset = -0.58 + line * 0.29;
+          movingParts.push(beam(`basket-net-long-${basketIndex}-${line}`, at(amount - 0.032, lateral + offset, 1.12 - Math.cos(offset * 2) * 0.22), at(amount + 0.032, lateral + offset, 1.12 - Math.cos(offset * 2) * 0.22), 0.04, whiteRope, { segments: 8, castShadow: true }));
+          movingParts.push(beam(`basket-net-cross-${basketIndex}-${line}`, at(amount + offset / Math.max(length, 1), lateral - 0.68, 1.12 - Math.cos(offset * 2) * 0.22), at(amount + offset / Math.max(length, 1), lateral + 0.68, 1.12 - Math.cos(offset * 2) * 0.22), 0.04, whiteRope, { segments: 8, castShadow: true }));
+        }
+        for (const corner of [-1, 1]) for (const longitudinal of [-1, 1]) {
+          const bottom = at(amount + longitudinal * 0.032, lateral + corner * 0.68, 1.23);
+          beam(`basket-hanger-${basketIndex}-${corner}-${longitudinal}`, bottom, at(amount + longitudinal * 0.018, lateral + corner * 1.55, 4.88), 0.06, whiteRope, { segments: 10, castShadow: true });
+          sphere(`basket-hanger-knot-${basketIndex}-${corner}-${longitudinal}`, 0.09, bottom, whiteRope, { segments: 8, castShadow: true });
+        }
+        const basketSurface = orientedSurface(`${attraction.officialId}-basket-${basketIndex}-surface`, center, 1.35, 1.15, center.y, yaw, { dynamic: true });
+        const origins = movingParts.map((mesh) => ({ ...mesh.position }));
+        addAnimation((seconds) => {
+          const sway = Math.sin(seconds * 0.72 + basketIndex * 1.4) * 0.16;
+          const bob = Math.sin(seconds * 0.96 + basketIndex) * 0.07;
+          movingParts.forEach((mesh, partIndex) => { const origin = origins[partIndex]; mesh.position.set(origin.x + px * sway, origin.y + bob, origin.z + pz * sway); });
+          basketSurface.previousX = basketSurface.x;
+          basketSurface.previousY = basketSurface.y;
+          basketSurface.previousZ = basketSurface.z;
+          basketSurface.x = center.x + px * sway;
+          basketSurface.y = center.y + bob;
+          basketSurface.z = center.z + pz * sway;
+        });
+      }
+      rideInteraction("basket-walk", "4つのネットブランコで空中散歩", at(0.11, 0, 1.3), at(0.91, 0, 1.3), 7_200, null, 1.2, 0.18);
+      representation.publishedBasketCount = basketCount;
+      representation.bespokePartCount = 86;
+      representation.detailProfile = "official-photo-matched-four-horizontal-square-steel-frame-net-baskets-deep-sagging-rope-floors-four-corner-hangers-knots-heavy-timber-gantry-and-independent-sway";
+      return true;
+    }
+    if (template === "exact-76x52-timber-frames") {
+      for (const amount of [0.07, 0.96]) {
+        for (const lateral of [-1.9, 1.9]) {
+          beam(`square-crawl-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 4.65), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`square-crawl-brace-${amount}-${lateral}`, at(amount, lateral, 0.4), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.15), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`square-crawl-cross-${amount}`, at(amount, -2.15, 4.52), at(amount, 2.15, 4.52), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      for (const lateral of [-1.42, 1.42]) beam(`square-crawl-top-rail-${lateral}`, at(0.07, lateral, 4.42), at(0.96, lateral, 4.42), 0.2, materials.wood, { segments: 12, castShadow: true });
+      const frameCount = 8;
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        const amount = 0.15 + frameIndex * 0.105;
+        const lateral = (frameIndex % 2 ? 0.12 : -0.12);
+        const centerY = 1.28 + Math.sin(frameIndex * 1.3) * 0.08;
+        const frameParts = [
+          beam(`square-exact-top-${frameIndex}`, at(amount, lateral - 0.5, centerY + 0.38), at(amount, lateral + 0.5, centerY + 0.38), 0.12, materials.wood, { segments: 10, castShadow: true }),
+          beam(`square-exact-bottom-${frameIndex}`, at(amount, lateral - 0.5, centerY - 0.38), at(amount, lateral + 0.5, centerY - 0.38), 0.12, materials.wood, { segments: 10, castShadow: true }),
+          beam(`square-exact-left-${frameIndex}`, at(amount, lateral - 0.5, centerY - 0.26), at(amount, lateral - 0.5, centerY + 0.26), 0.12, materials.wood, { segments: 10, castShadow: true }),
+          beam(`square-exact-right-${frameIndex}`, at(amount, lateral + 0.5, centerY - 0.26), at(amount, lateral + 0.5, centerY + 0.26), 0.12, materials.wood, { segments: 10, castShadow: true }),
+        ];
+        for (const side of [-1, 1]) {
+          beam(`square-frame-rope-${frameIndex}-${side}-front`, at(amount, lateral + side * 0.5, centerY + 0.4), at(amount - 0.025, lateral + side * 1.42, 4.4), 0.052, whiteRope, { segments: 8, castShadow: true });
+          beam(`square-frame-rope-${frameIndex}-${side}-rear`, at(amount, lateral + side * 0.5, centerY - 0.4), at(amount + 0.025, lateral + side * 1.42, 4.4), 0.052, whiteRope, { segments: 8, castShadow: true });
+          sphere(`square-frame-lashing-${frameIndex}-${side}`, 0.09, at(amount, lateral + side * 0.5, centerY + 0.42), whiteRope, { segments: 8, castShadow: true });
+        }
+        const origins = frameParts.map((mesh) => ({ ...mesh.position }));
+        addAnimation((seconds) => {
+          const sway = Math.sin(seconds * 0.7 + frameIndex * 0.8) * 0.06;
+          frameParts.forEach((mesh, partIndex) => { const origin = origins[partIndex]; mesh.position.set(origin.x + px * sway, origin.y, origin.z + pz * sway); });
+        });
+      }
+      rideInteraction("square-crawl", "幅76cm×高さ52cmの木枠を連続でくぐる", at(0.1, 0, 1.28), at(0.94, 0, 1.28), 7_400, null, 1.2, 0.14);
+      representation.publishedOpeningCentimeters = Object.freeze({ width: 76, height: 52 });
+      representation.publishedFrameCount = frameCount;
+      representation.bespokePartCount = 90;
+      representation.detailProfile = "official-photo-and-published-dimension-matched-eight-suspended-round-timber-frames-exact-76cm-by-52cm-openings-four-white-corner-lines-lashings-and-independent-sway";
+      return true;
+    }
+    if (template === "rope-to-catch-net") {
+      for (const amount of [0.09, 0.92]) {
+        for (const lateral of [-2.15, 2.15]) {
+          beam(`cold-pool-post-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5.35), 0.28, materials.wood, { segments: 12, castShadow: true });
+          beam(`cold-pool-brace-${amount}-${lateral}`, at(amount, lateral, 0.35), at(amount + (amount < 0.5 ? 0.12 : -0.12), lateral, 4.82), 0.16, materials.lightWood, { segments: 10, castShadow: true });
+        }
+        beam(`cold-pool-crossbar-${amount}`, at(amount, -2.42, 5.2), at(amount, 2.42, 5.2), 0.25, materials.wood, { segments: 12, castShadow: true });
+      }
+      beam("cold-pool-overhead-rail", at(0.08, 0, 5.08), at(0.52, 0, 5.08), 0.22, materials.wood, { segments: 12, castShadow: true });
+      const ropeTop = at(0.24, 0, 5.02);
+      const ropeBottom = at(0.24, 0, 0.85);
+      const swingRope = beam("cold-pool-swing-rope", ropeBottom, ropeTop, 0.085, whiteRope, { segments: 12, castShadow: true });
+      const ropeKnot = sphere("cold-pool-rope-knot", 0.16, ropeBottom, whiteRope, { segments: 10, castShadow: true });
+      for (let knotIndex = 0; knotIndex < 4; knotIndex += 1) sphere(`cold-pool-grip-knot-${knotIndex}`, 0.1, at(0.24, 0, 1.2 + knotIndex * 0.72), whiteRope, { segments: 9, castShadow: true });
+      const netAmount = 0.86;
+      for (let row = 0; row <= 9; row += 1) {
+        const y = 0.35 + row * 0.43;
+        const bow = Math.sin(row / 9 * Math.PI) * 0.36;
+        beam(`cold-pool-catch-net-row-${row}`, at(netAmount - bow / Math.max(length, 1), -1.78, y), at(netAmount - bow / Math.max(length, 1), 1.78, y), 0.052, whiteRope, { segments: 8, castShadow: true });
+      }
+      for (let column = 0; column <= 10; column += 1) {
+        const lateral = -1.78 + column * 0.356;
+        const bow = Math.cos((column - 5) / 5 * Math.PI / 2) * 0.34;
+        beam(`cold-pool-catch-net-column-${column}`, at(netAmount - bow / Math.max(length, 1), lateral, 0.35), at(netAmount, lateral, 4.22), 0.052, whiteRope, { segments: 8, castShadow: true });
+      }
+      for (const lateral of [-1.82, 1.82]) {
+        beam(`cold-pool-net-side-${lateral}`, at(netAmount, lateral, 0.22), at(netAmount, lateral, 4.4), 0.14, materials.wood, { segments: 12, castShadow: true });
+        beam(`cold-pool-net-guy-${lateral}`, at(netAmount, lateral, 0.4), at(0.98, lateral * 1.25, 0.05), 0.06, whiteRope, { segments: 8, castShadow: true });
+      }
+      const swingBaseRotationZ = swingRope.rotation.z;
+      addAnimation((seconds) => {
+        if (gameplay.ride?.id === `official-${attraction.officialId}-tarzan`) return;
+        const swing = Math.sin(seconds * 0.78 + index);
+        swingRope.rotation.z = swingBaseRotationZ + swing * 0.14;
+        ropeKnot.position.x = ropeBottom.x + px * swing * 1.75;
+        ropeKnot.position.z = ropeBottom.z + pz * swing * 1.75;
+      });
+      rideInteraction("tarzan", `${attraction.name}：ロープをつかむ`, at(0.14, 0, 1.2), at(0.82, 0, 1.45), 2_900, ropeKnot, -PLAYER_FOOT_OFFSET, 2.1);
+      representation.publishedCatchNet = true;
+      representation.publishedSeatCount = 0;
+      representation.bespokePartCount = 42;
+      representation.detailProfile = "official-photo-and-description-matched-seatless-white-swing-rope-four-grip-knots-across-cold-pool-into-large-deep-bowed-ten-by-eleven-rope-catch-net-timber-frame-and-guys";
+      return true;
+    }
     return false;
   }
 
@@ -4493,42 +6705,169 @@
     const torus = (suffix, radius, tube, position, material = primary, options = {}) => tagOfficialMesh(addTorus(`${attraction.officialId}-${suffix}`, "official-attraction", radius, tube, [position.x, position.y, position.z], material, options), representation);
     const photoMatchedTemplates = [
       "castle-net-gate", "small-flag-fort", "castle-slope", "dual-bouldering-wall", "traverse-castle-wall",
+      "castle-escape-slide", "swinging-ring-road", "suspended-iron-bar", "triangular-net-dungeon",
+      "transparent-floating-walls", "multi-height-chimney-wall", "healing-timber-swing", "twin-net-tunnels",
+      "double-trapeze-jump", "sideways-rope-traverse",
+      "suspended-zigzag-road", "low-hero-zigzag-path", "rocking-balance-road",
       "progressive-rope-weights", "magic-ball-maze", "jump-touch-panels", "punch-sandbag", "gong-log-finale",
       "mini-hydraulic-excavator", "polygon-antlion-bowl", "dense-pole-climb", "brick-heist-wall", "cooperative-sail-hoist",
       "two-storey-treehouse", "sky-spiral-stairs", "three-swords", "rope-labyrinth", "thunder-wire", "fortune-basketball",
       "wall-kick-corridor", "triangle-net-tunnel", "mini-bouldering-wall", "tightrope",
       "wave-balance", "ladder-hammer", "ring-toss", "suspended-ox-crossing", "static-shape-steps",
       "long-monkey-bars", "multiple-seesaws", "hanging-board", "three-walls", "rotating-barrels", "jump-net",
+      "sloth-parallel-logs", "super-ring-canopy", "wall-kick-tower", "twin-giant-slide", "timber-wave-course",
+      "dual-warped-walls", "double-ball-slider", "pachinko-shooter", "twelve-panel-soccer", "nine-panel-pitching",
+      "timber-mole-tunnel",
       "frisbee-shooter", "log-wall-traverse", "cup-drop-tower", "parallel-wall-bridge",
       "fishing-lift", "ball-maze", "bank-bowling", "dragon",
+      "transparent-spider-corridor", "single-balance-log", "infinite-hanging-rings", "long-water-monkey-bars",
+      "triple-hammock-gates", "twin-ninja-pull-boards", "three-choice-parallel-logs", "eight-padded-floating-islands",
+      "double-pulley-ball-slider", "one-point-two-sumo-stage", "dual-difficulty-jump-islands", "direct-hang-sloth-log",
+      "dual-height-water-tightropes", "basket-net-swings", "exact-76x52-timber-frames", "rope-to-catch-net",
       "hill-logs", "zigzag-logs", "net-wall", "pull-raft", "log-swings", "suspension-bridge", "three-second-wall",
       "sinking-raft", "web-hill", "overhang-wall", "long-log-raft", "water-slide", "suspended-log-disks", "rope-jungle",
       "cling-log-wall", "barrel-boat", "water-dash", "super-jump-lanes", "steep-rope-ramp", "spiral-stairs", "rotating-balls",
       "rope-forest", "hanging-stilts", "hanging-stairs", "hanging-platforms", "climbing-fort", "rotating-handles",
       "swinging-log-bridge", "finger-ledge", "lift-logs", "irregular-rings", "flying-log", "resistance-bell",
+      "suspended-grip-balls", "rugged-timber-mountain", "rescue-rope-training", "inclined-pipe-traverse",
+      "mini-monkey-bars", "mini-ball-throw-target", "small-timber-playhouse", "mini-wire-slider",
     ];
     const hasPhotoMatchedTraversal = photoMatchedTemplates.includes(template);
 
     const deckSize = attraction.areaId === "mecya-forest" ? 5.4 : attraction.areaId === "wonder-amembo" ? 4.2 : 4.8;
-    playable("checkpoint-deck", [deckSize, 0.34, deckSize], { x: point.x, y: baseY - 0.17, z: point.z }, attraction.areaId === "mecya-forest" ? materials.wood : secondary);
+    const buildDetailedCheckpointDeck = () => {
+      const plankCount = Math.max(9, Math.round(deckSize / 0.46));
+      const deckHalf = deckSize / 2;
+      const plankWidth = (deckSize - 0.22) / plankCount;
+      playable(
+        "checkpoint-deck",
+        [deckSize, 0.28, deckSize],
+        { x: point.x, y: baseY - 0.14, z: point.z },
+        materials.darkWood,
+        { rotationY: yaw, castShadow: true },
+      );
+      for (let plankIndex = 0; plankIndex < plankCount; plankIndex += 1) {
+        const lateral = -deckSize / 2 + 0.11 + plankWidth / 2 + plankIndex * plankWidth;
+        queueOfficialStaticPrimitive(representation, {
+          name: `${attraction.officialId}-checkpoint-deck-plank-${plankIndex}`,
+          role: "official-attraction",
+          type: "box",
+          material: materials.wood,
+          position: [
+            point.x + px * lateral,
+            baseY - 0.075 + Math.sin((index + plankIndex) * 1.73) * 0.003,
+            point.z + pz * lateral,
+          ],
+          scale: [Math.max(0.24, plankWidth - 0.045), 0.16, deckSize - 0.2],
+          rotationY: yaw,
+          castShadow: true,
+          receiveShadow: true,
+          componentType: "checkpoint-deck-plank",
+        });
+      }
+      for (const along of [-0.32, 0, 0.32]) {
+        const alongOffset = along * deckSize;
+        queueOfficialStaticPrimitive(representation, {
+          name: `${attraction.officialId}-checkpoint-deck-underside-joist-${along}`,
+          role: "official-attraction",
+          type: "box",
+          material: materials.darkWood,
+          position: [point.x + ux * alongOffset, baseY - 0.34, point.z + uz * alongOffset],
+          scale: [deckSize - 0.28, 0.22, 0.28],
+          rotationY: yaw,
+          castShadow: true,
+          componentType: "checkpoint-deck-joist",
+        });
+      }
+      for (const alongSide of [-1, 1]) {
+        for (const lateralSide of [-1, 1]) {
+          const corner = {
+            x: point.x + ux * alongSide * (deckHalf - 0.2) + px * lateralSide * (deckHalf - 0.2),
+            y: baseY - 0.18,
+            z: point.z + uz * alongSide * (deckHalf - 0.2) + pz * lateralSide * (deckHalf - 0.2),
+          };
+          queueOfficialStaticPrimitive(representation, {
+            name: `${attraction.officialId}-checkpoint-deck-corner-bracket-long-${alongSide}-${lateralSide}`,
+            role: "official-attraction",
+            type: "box",
+            material: materials.steel,
+            position: [corner.x, corner.y, corner.z],
+            scale: [0.52, 0.28, 0.12],
+            rotationY: yaw,
+            castShadow: true,
+            componentType: "checkpoint-deck-bracket",
+          });
+          queueOfficialStaticPrimitive(representation, {
+            name: `${attraction.officialId}-checkpoint-deck-corner-bracket-cross-${alongSide}-${lateralSide}`,
+            role: "official-attraction",
+            type: "box",
+            material: materials.steel,
+            position: [corner.x, corner.y, corner.z],
+            scale: [0.12, 0.28, 0.52],
+            rotationY: yaw,
+            castShadow: true,
+            componentType: "checkpoint-deck-bracket",
+          });
+          const fastener = {
+            x: point.x + ux * alongSide * (deckHalf - 0.42) + px * lateralSide * (deckHalf - 0.42),
+            y: baseY + 0.035,
+            z: point.z + uz * alongSide * (deckHalf - 0.42) + pz * lateralSide * (deckHalf - 0.42),
+          };
+          queueOfficialStaticPrimitive(representation, {
+            name: `${attraction.officialId}-checkpoint-deck-washer-${alongSide}-${lateralSide}`,
+            role: "official-attraction",
+            type: "torus",
+            material: materials.steel,
+            position: [fastener.x, fastener.y, fastener.z],
+            scale: [0.12, 0.12, 0.03 / 0.18],
+            rotationX: Math.PI / 2,
+            segments: 12,
+            castShadow: true,
+            componentType: "checkpoint-deck-washer",
+          });
+          queueOfficialStaticPrimitive(representation, {
+            name: `${attraction.officialId}-checkpoint-deck-bolt-${alongSide}-${lateralSide}`,
+            role: "official-attraction",
+            type: "cylinder",
+            material: materials.steel,
+            position: [fastener.x, fastener.y + 0.03, fastener.z],
+            scale: [0.067, 0.09, 0.067],
+            segments: 10,
+            castShadow: true,
+            componentType: "checkpoint-deck-bolt",
+          });
+        }
+      }
+      representation.deckPlankCount = plankCount;
+      representation.deckJoistCount = 3;
+      representation.deckCornerBracketCount = 8;
+      representation.deckFastenerCount = 8;
+    };
+    buildDetailedCheckpointDeck();
     if (attraction.areaId === "mecya-forest") {
       cylinder("tree-support", 0.7, Math.max(1, baseY), { x: point.x, y: baseY / 2, z: point.z }, materials.darkWood, { segments: 9, solid: true, blocker: false });
     }
 
     if (previous && attraction.areaId === "mecya-forest" && template !== "zip") {
-      for (let supportIndex = 0; supportIndex <= 16; supportIndex += 1) {
-        const amount = 0.04 + supportIndex * 0.06;
+      // Join the actual obstacle colliders with overlapping footholds. The old
+      // fixed 17 samples left almost half-metre holes on the longest spans.
+      const supportSpacing = 0.68;
+      const supportCount = Math.max(16, Math.ceil(length * 0.92 / supportSpacing));
+      for (let supportIndex = 0; supportIndex <= supportCount; supportIndex += 1) {
+        const amount = lerp(0.04, 0.96, supportIndex / supportCount);
         const location = at(amount, 0, 0.12);
         addSurface(
           `${attraction.officialId}-precision-traversal-${supportIndex}`,
           location.x,
           location.z,
-          1.35,
-          1.35,
+          1.18,
+          1.18,
           location.y,
           { areaId: attraction.areaId },
         );
       }
+      representation.collisionGuideCount = supportCount + 1;
+      representation.collisionGuideSpacingMeters = Number((length * 0.92 / supportCount).toFixed(3));
     } else if (previous && attraction.areaId !== "mecya-forest" && !hasPhotoMatchedTraversal) {
       const steps = attraction.areaId === "mecya-forest" ? 5 : 4;
       for (let step = 1; step <= steps; step += 1) {
@@ -4555,7 +6894,7 @@
       beam("forest-grey-belay-cable", at(0.03, 2.35, 2.55), at(0.99, 2.35, 2.55), 0.055, materials.steel);
       for (let safetyStay = 0; safetyStay <= 8; safetyStay += 1) {
         const amount = 0.03 + safetyStay * 0.12;
-        beam(`forest-safety-stay-${safetyStay}`, at(amount, -1.75, 0.15), at(amount, -2.35, 2.35), 0.035, materials.white);
+        beam(`forest-safety-stay-${safetyStay}`, at(amount, -1.75, 0.15), at(amount, -2.35, 2.35), 0.035, materials.whiteRope);
       }
     }
 
@@ -4582,21 +6921,21 @@
       tagOfficialMesh(addRamp(`${attraction.officialId}-log-surface`, "official-attraction", [at(0.14).x, baseY + 0.84, at(0.14).z], [at(0.91).x, baseY + 0.84, at(0.91).z], 0.82, materials.lightWood, { areaId: attraction.areaId }), representation);
       for (let hanger = 0; hanger < 5; hanger += 1) {
         const location = at(0.18 + hanger * 0.17, 0, 0.9);
-        beam(`single-log-hanger-${hanger}`, location, { ...location, y: location.y + 4.4 }, 0.065, materials.white);
+        beam(`single-log-hanger-${hanger}`, location, { ...location, y: location.y + 4.4 }, 0.065, materials.whiteRope);
       }
     } else if (template === "hammock-wall") {
-      for (let row = 0; row < 6; row += 1) beam(`hammock-row-${row}`, at(0.18, 0, 0.6 + row * 0.62), at(0.9, 0, 0.6 + row * 0.62), 0.075, materials.white);
+      for (let row = 0; row < 6; row += 1) beam(`hammock-row-${row}`, at(0.18, 0, 0.6 + row * 0.62), at(0.9, 0, 0.6 + row * 0.62), 0.075, materials.whiteRope);
       for (let column = 0; column < 9; column += 1) {
         const lateralWave = Math.sin(column * 1.4) * 0.55;
-        beam(`hammock-column-${column}`, at(0.2 + column * 0.085, lateralWave, 0.5), at(0.2 + column * 0.085, lateralWave, 4.2), 0.075, materials.white);
+        beam(`hammock-column-${column}`, at(0.2 + column * 0.085, lateralWave, 0.5), at(0.2 + column * 0.085, lateralWave, 4.2), 0.075, materials.whiteRope);
       }
       for (const hole of [0.38, 0.7]) torus(`hammock-hole-${hole}`, 1.05, 0.12, at(hole, -0.12, 2.25), secondary, { rotationY: yaw + Math.PI / 2, segments: 18 });
     } else if (template === "ninja-platforms") {
-      beam("ninja-center-rope", at(0.12, 0, 1.2), at(0.92, 0, 1.2), 0.1, materials.white);
+      beam("ninja-center-rope", at(0.12, 0, 1.2), at(0.92, 0, 1.2), 0.1, materials.whiteRope);
       for (let platformIndex = 0; platformIndex < 6; platformIndex += 1) {
         const location = at(0.18 + platformIndex * 0.13, platformIndex % 2 ? 0.8 : -0.8, 0.38);
         const platform = playable(`ninja-platform-${platformIndex}`, [2.1, 0.28, 2.1], { x: location.x, y: location.y - 0.14, z: location.z }, platformIndex % 2 ? primary : secondary, { dynamic: true });
-        beam(`ninja-platform-rope-${platformIndex}`, location, { ...location, y: location.y + 4.2 }, 0.065, materials.white);
+        beam(`ninja-platform-rope-${platformIndex}`, location, { ...location, y: location.y + 4.2 }, 0.065, materials.whiteRope);
         const originY = platform.mesh.position.y;
         addAnimation((seconds) => {
           platform.surface.previousY = platform.surface.y;
@@ -4625,7 +6964,7 @@
           island.surface.y = island.mesh.position.y + 0.25;
         });
       }
-      beam("island-pull-rope", at(0.15, 2.3, 1), at(0.92, 2.3, 1), 0.08, materials.white);
+      beam("island-pull-rope", at(0.15, 2.3, 1), at(0.92, 2.3, 1), 0.08, materials.whiteRope);
     } else if (template === "ball-slider") {
       let rideBall = null;
       let rideCableFrom = null;
@@ -4640,7 +6979,7 @@
           rideCableFrom = cableFrom;
           rideCableTo = cableTo;
         }
-        beam(`ball-slider-hanger-${lane}`, cableFrom, { ...cableFrom, y: cableFrom.y - 1.35 }, 0.08, materials.white);
+        beam(`ball-slider-hanger-${lane}`, cableFrom, { ...cableFrom, y: cableFrom.y - 1.35 }, 0.08, materials.whiteRope);
         addAnimation((seconds) => {
           if (lane < 0 && gameplay.ride?.id === `official-${attraction.officialId}-ball-slider`) return;
           const amount = (Math.sin(seconds * 0.65 + lane + index) + 1) / 2;
@@ -4686,20 +7025,20 @@
       for (let hold = 0; hold < 7; hold += 1) {
         const location = at(0.19 + hold * 0.11, 0, 3.2 + (hold % 2) * 0.3);
         sphere(`sloth-hold-${hold}`, 0.34, location, hold % 2 ? primary : secondary, { scaleY: 1.5, segments: 9 });
-        beam(`sloth-hold-rope-${hold}`, location, { ...location, y: location.y + 1.05 }, 0.055, materials.white);
+        beam(`sloth-hold-rope-${hold}`, location, { ...location, y: location.y + 1.05 }, 0.055, materials.whiteRope);
       }
     } else if (template === "tightrope") {
       beam("tightrope-foot", at(0.12, 0, 0.48), at(0.92, 0, 0.48), 0.11, materials.coral);
-      for (const lateral of [-2.3, 2.3]) beam(`tightrope-hand-${lateral}`, at(0.12, lateral, 1.9), at(0.92, lateral * 0.55, 1.9), 0.08, materials.white);
-      const balance = beam("tightrope-balance-bar", at(0.42, -2.8, 2.4), at(0.42, 2.8, 2.4), 0.09, materials.white);
+      for (const lateral of [-2.3, 2.3]) beam(`tightrope-hand-${lateral}`, at(0.12, lateral, 1.9), at(0.92, lateral * 0.55, 1.9), 0.08, materials.whiteRope);
+      const balance = beam("tightrope-balance-bar", at(0.42, -2.8, 2.4), at(0.42, 2.8, 2.4), 0.09, materials.whiteRope);
       addAnimation((seconds) => { balance.rotation.z = Math.sin(seconds * 0.9 + index) * 0.16; });
     } else if (template === "net-swings") {
       for (let swingIndex = 0; swingIndex < 4; swingIndex += 1) {
         const location = at(0.24 + swingIndex * 0.19, 0, 1.8);
         const frame = torus(`net-swing-frame-${swingIndex}`, 1.45, 0.12, location, materials.white, { rotationY: yaw + Math.PI / 2, segments: 4 });
         frame.scale.y *= 0.9;
-        for (const lateral of [-0.75, 0, 0.75]) beam(`net-swing-grid-${swingIndex}-${lateral}`, { x: location.x + px * lateral, y: location.y - 1.1, z: location.z + pz * lateral }, { x: location.x + px * lateral, y: location.y + 1.1, z: location.z + pz * lateral }, 0.045, materials.white);
-        beam(`net-swing-hanger-${swingIndex}`, { ...location, y: location.y + 1.4 }, { ...location, y: location.y + 4.4 }, 0.07, materials.white);
+        for (const lateral of [-0.75, 0, 0.75]) beam(`net-swing-grid-${swingIndex}-${lateral}`, { x: location.x + px * lateral, y: location.y - 1.1, z: location.z + pz * lateral }, { x: location.x + px * lateral, y: location.y + 1.1, z: location.z + pz * lateral }, 0.045, materials.whiteRope);
+        beam(`net-swing-hanger-${swingIndex}`, { ...location, y: location.y + 1.4 }, { ...location, y: location.y + 4.4 }, 0.07, materials.whiteRope);
         addAnimation((seconds) => { frame.rotation.z = Math.sin(seconds * 1.05 + swingIndex) * 0.15; });
       }
     } else if (template === "square-frames") {
@@ -4707,11 +7046,11 @@
         const location = at(0.16 + frameIndex * 0.12, 0, 1.45);
         const frame = torus(`square-frame-${frameIndex}`, 1.25, 0.14, location, materials.wood, { rotationY: yaw + Math.PI / 2, segments: 4 });
         frame.scale.y *= 0.684;
-        beam(`square-frame-rope-${frameIndex}`, { ...location, y: location.y - 0.8 }, { ...location, y: location.y + 3.8 }, 0.045, materials.white);
+        beam(`square-frame-rope-${frameIndex}`, { ...location, y: location.y - 0.8 }, { ...location, y: location.y + 3.8 }, 0.045, materials.whiteRope);
       }
     } else if (template === "tarzan-rope") {
       beam("tarzan-top", at(0.1, 0, 5.5), at(0.92, 0, 5.5), 0.2, materials.darkWood);
-      const rope = beam("tarzan-rope", at(0.52, 0, 5.5), at(0.52, 0, 0.8), 0.1, materials.white);
+      const rope = beam("tarzan-rope", at(0.52, 0, 5.5), at(0.52, 0, 0.8), 0.1, materials.whiteRope);
       const seat = cylinder("tarzan-seat", 0.55, 1.6, at(0.52, 0, 0.65), primary, { rotationZ: Math.PI / 2, segments: 12 });
       addAnimation((seconds) => {
         if (gameplay.ride?.id === `official-${attraction.officialId}-tarzan`) return;
@@ -4729,14 +7068,14 @@
       for (let grip = 0; grip < 7; grip += 1) {
         const location = at(0.18 + grip * 0.115, 0, 3.6 + Math.sin(grip) * 0.28);
         sphere(`grip-ball-${grip}`, 0.48, location, grip % 2 ? materials.orange : materials.yellow, { segments: 12 });
-        beam(`grip-rope-${grip}`, location, { ...location, y: location.y + 2.5 }, 0.06, materials.white);
+        beam(`grip-rope-${grip}`, location, { ...location, y: location.y + 2.5 }, 0.06, materials.whiteRope);
       }
     } else if (template === "rugged-wall") {
       box("rugged-wall", [1.1, 6.2, 9], { x: anchor.x, y: baseY + 3.1, z: anchor.z }, materials.darkWood, { rotationY: yaw });
       for (let bump = 0; bump < 12; bump += 1) box(`rugged-bump-${bump}`, [0.65 + bump % 3 * 0.25, 0.65 + bump % 2 * 0.3, 1.2], { x: anchor.x - ux * 0.75 + px * ((bump % 4) - 1.5) * 1.5, y: baseY + 0.8 + Math.floor(bump / 4) * 1.55, z: anchor.z - uz * 0.75 + pz * ((bump % 4) - 1.5) * 1.5 }, bump % 2 ? materials.wood : materials.lightWood, { rotationY: yaw });
       tagOfficialMesh(addRamp(`${attraction.officialId}-rugged-ramp`, "official-attraction", [at(0.25).x, baseY, at(0.25).z], [anchor.x, baseY + 6.1, anchor.z], 3.4, materials.wood, { areaId: attraction.areaId }), representation);
     } else if (template === "rescue-ropes") {
-      for (const height of [1.15, 2.55]) for (const lateral of [-0.7, 0.7]) beam(`rescue-rope-${height}-${lateral}`, at(0.12, lateral, height), at(0.92, lateral, height), 0.1, materials.white);
+      for (const height of [1.15, 2.55]) for (const lateral of [-0.7, 0.7]) beam(`rescue-rope-${height}-${lateral}`, at(0.12, lateral, height), at(0.92, lateral, height), 0.1, materials.whiteRope);
       for (const amount of [0.1, 0.94]) for (const lateral of [-2.2, 2.2]) beam(`rescue-frame-${amount}-${lateral}`, at(amount, lateral, 0), at(amount, lateral, 5), 0.22, materials.darkWood);
     } else if (template === "angled-pipe") {
       beam("angled-pipe", at(0.14, 0, 1.2), at(0.92, 0, 4.8), 0.24, materials.steel, { segments: 12 });
@@ -4762,7 +7101,7 @@
         const center = at(0.55, 0, 2.45);
         for (let spoke = 0; spoke < 8; spoke += 1) {
           const angle = spoke / 8 * Math.PI * 2;
-          beam(`web-spoke-${spoke}`, center, { x: center.x + Math.cos(angle) * 3, y: center.y + Math.sin(angle) * 2.2, z: center.z }, 0.05, materials.white);
+          beam(`web-spoke-${spoke}`, center, { x: center.x + Math.cos(angle) * 3, y: center.y + Math.sin(angle) * 2.2, z: center.z }, 0.05, materials.whiteRope);
         }
       }
     } else if (template === "tunnel") {
@@ -4968,8 +7307,8 @@
         if (template === "shape-steps" && shape % 3 === 0) torus(`shape-ring-${shape}`, 1.1, 0.22, location, palette[shape % palette.length], { rotationX: Math.PI / 2, segments: 18 });
         else playable(`shape-step-${shape}`, [2.3, 0.38, 2.3], { x: location.x, y: location.y - 0.19, z: location.z }, palette[shape % palette.length], { rotationY: shape % 2 ? Math.PI / 4 : 0 });
         if (template === "ox-steps" && shape % 2) {
-          beam(`x-mark-a-${shape}`, { x: location.x - 0.75, y: location.y + 0.08, z: location.z - 0.75 }, { x: location.x + 0.75, y: location.y + 0.08, z: location.z + 0.75 }, 0.12, materials.white);
-          beam(`x-mark-b-${shape}`, { x: location.x + 0.75, y: location.y + 0.08, z: location.z - 0.75 }, { x: location.x - 0.75, y: location.y + 0.08, z: location.z + 0.75 }, 0.12, materials.white);
+          beam(`x-mark-a-${shape}`, { x: location.x - 0.75, y: location.y + 0.08, z: location.z - 0.75 }, { x: location.x + 0.75, y: location.y + 0.08, z: location.z + 0.75 }, 0.12, materials.white, { solid: false, blocker: false });
+          beam(`x-mark-b-${shape}`, { x: location.x + 0.75, y: location.y + 0.08, z: location.z - 0.75 }, { x: location.x - 0.75, y: location.y + 0.08, z: location.z + 0.75 }, 0.12, materials.white, { solid: false, blocker: false });
         }
       }
     } else if (template === "dragon") {
@@ -5107,10 +7446,121 @@
     addBox("complete-kairiki-field", "official-field", [118, 0.08, 78], [-220, 0.03, 380], materials.grassDark, { castShadow: false });
     addBox("complete-chibido-field", "official-field", [96, 0.1, 54], [-108, 0.04, 363], materials.rubber, { castShadow: false });
 
-    for (let treeIndex = 0; treeIndex < 28; treeIndex += 1) {
-      const row = Math.floor(treeIndex / 7);
-      const column = treeIndex % 7;
-      addTree(-454 + column * 21, 231 + row * 29, 0.72 + (treeIndex % 4) * 0.09, 300 + treeIndex, "official-forest");
+    // Scatter the forest around (not on) the route nodes so the canopy reads as Mt. Rokko woodland,
+    // while trunks never turn the official traversal line into an accidental collision maze.
+    const forestRoutePoints = forestOfficialLayoutPoints();
+    const forestRandom = seededRandom(62026);
+    const forestScenerySites = [];
+    let forestAttempts = 0;
+    while (forestScenerySites.length < 28 && forestAttempts < 280) {
+      forestAttempts += 1;
+      const x = -456 + forestRandom() * 238;
+      const z = 228 + forestRandom() * 116;
+      const clearOfRoute = forestRoutePoints.every((point) => Math.hypot(point.x - x, point.z - z) > 7.2);
+      const clearOfTree = forestScenerySites.every((site) => Math.hypot(site.x - x, site.z - z) > 6.8);
+      if (!clearOfRoute || !clearOfTree) continue;
+      forestScenerySites.push({ x, z, scale: 1.02 + forestRandom() * 0.48 });
+    }
+    forestScenerySites.forEach((site, treeIndex) => addTree(site.x, site.z, site.scale, 300 + treeIndex, "landscape"));
+
+    const forestMounds = [
+      [-448, 287, 15, 8, 0.18], [-416, 285, 12, 7, 0.14], [-381, 288, 14, 8, 0.2], [-345, 286, 11, 6, 0.16],
+      [-310, 290, 13, 7, 0.18], [-276, 291, 10, 6, 0.13], [-242, 285, 12, 7, 0.17], [-326, 321, 15, 7, 0.15],
+    ];
+    forestMounds.forEach(([x, z, radiusX, radiusZ, height], index) => {
+      const mound = addCylinder(`forest-floor-mound-${index}`, "landscape", 1, height, [x, height / 2, z], index % 3 === 0 ? materials.path : materials.grassDark, {
+        segments: 10 + (index % 3),
+        castShadow: false,
+        receiveShadow: true,
+      });
+      mound.scale.x = radiusX;
+      mound.scale.z = radiusZ;
+    });
+
+    forestScenerySites.slice(0, 22).forEach((site, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      const fern = addCone(
+        `forest-floor-fern-${index}`,
+        "landscape",
+        0.82 + (index % 4) * 0.14,
+        1.08 + (index % 3) * 0.2,
+        [site.x + side * (1.4 + (index % 3) * 0.38), 0.56, site.z + ((index % 5) - 2) * 0.46],
+        index % 5 === 0 ? materials.lime : materials.grassDark,
+        { segments: 6, castShadow: false },
+      );
+      fern.rotation.z = side * 0.16;
+    });
+    forestScenerySites.slice(0, 10).forEach((site, index) => {
+      for (const lobe of [-1, 1]) {
+        addSphere(
+          `forest-floor-shrub-${index}-${lobe}`,
+          "landscape",
+          0.9 + (index % 3) * 0.14,
+          [site.x + lobe * 0.76, 0.68 + (index % 2) * 0.1, site.z + lobe * 0.34],
+          index % 4 === 0 ? materials.lime : materials.grassDark,
+          { scaleX: 1.28, scaleY: 0.68, scaleZ: 1.08, segments: 7, castShadow: false },
+        );
+      }
+    });
+
+    // The official AMEMBO photos show a pond framed by low vegetation, irregular stones and timber rails.
+    // Keep the first/last obstacle lanes open by concentrating this detail on the outside bank.
+    const shoreBanks = [
+      [-435, 340, 5.2], [-408, 340, 4.4], [-377, 340, 4.8], [-344, 340, 4.2],
+      [-431, 418, 4.7], [-393, 418, 4.3], [-350, 418, 4.9], [-312, 418, 4.2],
+    ];
+    shoreBanks.forEach(([x, z, radius], index) => addCylinder(
+      `amembo-shore-bank-${index}`,
+      "landscape",
+      radius,
+      0.16 + (index % 3) * 0.025,
+      [x, 0.075, z],
+      index % 4 === 0 ? materials.path : materials.grassDark,
+      { segments: 8 + (index % 4), castShadow: false, receiveShadow: true },
+    ));
+
+    const shoreRocks = [
+      [-428, 341, 0.72], [-414, 341, 0.52], [-386, 340, 0.66], [-356, 341, 0.5],
+      [-326, 340, 0.7], [-304, 342, 0.55], [-446, 418, 0.68], [-421, 417, 0.5],
+      [-397, 419, 0.76], [-370, 417, 0.54], [-343, 418, 0.7], [-316, 417, 0.52],
+      [-458, 365, 0.62], [-458, 397, 0.56], [-290, 358, 0.58], [-290, 405, 0.66],
+    ];
+    shoreRocks.forEach(([x, z, scale], index) => addRock(x, z, scale, 700 + index));
+
+    const reedSites = [
+      [-440, 340], [-402, 340], [-368, 340], [-334, 340], [-306, 341],
+      [-446, 418], [-409, 418], [-378, 418], [-342, 418], [-309, 417],
+      [-458, 352], [-458, 375], [-458, 405], [-290, 349], [-290, 371],
+      [-290, 398], [-425, 417], [-389, 340], [-353, 418], [-320, 341],
+    ];
+    reedSites.forEach(([x, z], index) => {
+      for (const blade of [-1, 1]) {
+        const reed = addCone(
+          `amembo-reed-${index}-${blade}`,
+          "landscape",
+          0.14 + (index % 3) * 0.028,
+          1.1 + ((index + blade) % 4) * 0.14,
+          [x + blade * 0.24, 0.61, z + blade * 0.13],
+          index % 4 === 0 ? materials.lime : materials.grassDark,
+          { segments: 5, castShadow: false },
+        );
+        reed.rotation.z = blade * (0.1 + (index % 3) * 0.025);
+      }
+    });
+
+    for (let railPost = 0; railPost < 6; railPost += 1) {
+      addCylinder(`amembo-east-safety-post-${railPost}`, "landscape", 0.18, 2.35, [-287.6, 1.175, 350 + railPost * 12], materials.darkWood, {
+        segments: 8,
+        solid: true,
+        castShadow: railPost < 3,
+      });
+    }
+    for (const railY of [0.92, 1.86]) {
+      addBeamBetween(`amembo-east-safety-rail-${railY}`, "landscape", [-287.6, railY, 350], [-287.6, railY, 410], 0.15, materials.wood, {
+        segments: 8,
+        solid: true,
+        castShadow: railY > 1,
+      });
     }
 
     for (const [areaId, layout] of Object.entries(COMPLETE_AREA_LAYOUTS)) {
@@ -5343,7 +7793,10 @@
     const wavePoints = [[-94, 102.5], [-90, 104.4], [-86, 102.5], [-82, 104.4], [-78, 102.5]];
     wavePoints.slice(0, -1).forEach(([x, z], index) => {
       const next = wavePoints[index + 1];
-      addBeamBetween(`chibido-wave-balance-${index}`, "chibidoland", [x, 0.58, z], [next[0], 0.58, next[1]], 0.24, [materials.coral, materials.yellow, materials.lime, materials.blue][index]);
+      addBeamBetween(`chibido-wave-balance-${index}`, "chibidoland", [x, 0.58, z], [next[0], 0.58, next[1]], 0.24, [materials.coral, materials.yellow, materials.lime, materials.blue][index], {
+        areaId: area.id,
+        walkableSurface: true,
+      });
     });
 
     // 06 ハシゴときづち / 07 わなげ / 08 ボール投げ / 10 〇×わたり
@@ -6081,7 +8534,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       </div>
       <div class="voxcel-athletic-progress"><i data-athletic-progress></i></div>
       <div class="voxcel-athletic-course-strip" data-athletic-courses></div>
-      <div class="voxcel-athletic-help">WASD / 矢印：移動　SPACE：ジャンプ　SHIFT：ダッシュ　E：操作　R：復帰　ESC：退出</div>
+      <div class="voxcel-athletic-help" data-athletic-help>WASD / 矢印：移動　SPACE：ジャンプ　SHIFT：ダッシュ　E：操作　R：復帰　ESC：退出</div>
     `;
     const strip = hud.querySelector("[data-athletic-courses]");
     for (const area of AREA_DEFINITIONS) {
@@ -6112,12 +8565,20 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     const press = (control) => (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (control === "jump") gameplay.jumpQueued = true;
+      if (control === "jump" && !gameplay.ride?.locksLocomotion) {
+        gameplay.jumpHeld = true;
+        gameplay.jumpQueued = true;
+        gameplay.jumpBufferUntil = performance.now() + JUMP_BUFFER_MS;
+      }
       if (control === "action") activateNearestInteraction();
       if (control === "respawn") requestRespawn("manual");
     };
     for (const button of mobileControls.querySelectorAll("button")) {
       button.addEventListener("pointerdown", press(button.dataset.athleticControl));
+      if (button.dataset.athleticControl === "jump") {
+        button.addEventListener("pointerup", () => { gameplay.jumpHeld = false; });
+        button.addEventListener("pointercancel", () => { gameplay.jumpHeld = false; });
+      }
     }
     document.body.append(mobileControls);
   }
@@ -6200,6 +8661,8 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
   function cancelRide() {
     gameplay.ride = null;
     gameplay.ziplineProgress = null;
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
   }
 
   function exitPlayMode(options = {}) {
@@ -6294,6 +8757,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     gameplay.velocityX = 0;
     gameplay.velocityY = 0;
     gameplay.velocityZ = 0;
+    gameplay.fallOriginY = null;
     if (reason !== "manual") gameplay.fallCount += 1;
     const run = gameplay.activeAreaId ? ensureAreaRun(gameplay.activeAreaId) : null;
     if (run && reason !== "manual") {
@@ -6314,15 +8778,72 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     });
     gameplay.mode = gameplay.activeAreaId ? "running" : "running";
     gameplay.respawnAt = 0;
+    gameplay.fallOriginY = null;
     updateUi();
   }
 
+  function normalizeManualWaypoint(point) {
+    const candidates = surfaceCandidates(point.x, point.z);
+    let closest = null;
+    for (const candidate of candidates) {
+      const rootDistance = Math.abs(candidate.y - (point.y - PLAYER_FOOT_OFFSET));
+      const footDistance = Math.abs(candidate.y - point.y);
+      const score = Math.min(rootDistance, footDistance);
+      if (!closest || score < closest.score) closest = { candidate, score, rootDistance, footDistance };
+    }
+    if (!closest || closest.score > 0.72) return { ...point };
+    return {
+      ...point,
+      y: closest.footDistance < closest.rootDistance
+        ? closest.candidate.y + PLAYER_FOOT_OFFSET
+        : point.y,
+    };
+  }
+
+  function beginManualTraversal(id, areaId, waypoints, durationMs, label, checkpointIndex = null, options = {}) {
+    if (gameplay.ride || !gameplay.active || gameplay.activeAreaId !== areaId || !Array.isArray(waypoints) || waypoints.length < 2) return false;
+    const normalizedWaypoints = waypoints.map(normalizeManualWaypoint);
+    gameplay.mode = "traversing";
+    gameplay.ride = {
+      id,
+      kind: "manual-path",
+      locksLocomotion: false,
+      areaId,
+      label,
+      start: { ...normalizedWaypoints[0] },
+      end: { ...normalizedWaypoints.at(-1) },
+      waypoints: normalizedWaypoints,
+      durationMs,
+      startedAt: performance.now(),
+      elapsedMs: 0,
+      progress: 0,
+      lateralOffset: 0,
+      hopOffset: 0,
+      hopVelocity: 0,
+      checkpointIndex,
+    };
+    gameplay.ziplineProgress = 0;
+    gameplay.velocityX = 0;
+    gameplay.velocityY = 0;
+    gameplay.velocityZ = 0;
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
+    setPlayerPosition(normalizedWaypoints[0], { surfaceId: `${id}-manual-start` });
+    handle.notify?.(options.startMessage || `🧗 ${label}：W/Sで進退、A/Dで姿勢調整、SPACEでジャンプ`);
+    playTone(360, 0.12, "triangle");
+    return true;
+  }
+
   function beginLocalRide(id, areaId, start, end, durationMs, trolley, label, checkpointIndex = null, trolleyOffsetY = 1.2, sagAmount = 1.45) {
+    if (!trolley) {
+      return beginManualTraversal(id, areaId, [start, end], durationMs, label, checkpointIndex);
+    }
     if (gameplay.ride || !gameplay.active || gameplay.activeAreaId !== areaId) return false;
     gameplay.mode = "ziplining";
     gameplay.ride = {
       id,
       kind: "course",
+      locksLocomotion: true,
       areaId,
       label,
       start: { ...start },
@@ -6339,17 +8860,21 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     gameplay.velocityX = 0;
     gameplay.velocityY = 0;
     gameplay.velocityZ = 0;
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
     handle.notify?.(`🪂 ${label} スタート！`);
     playTone(380, 0.14, "triangle");
     return true;
   }
 
   function beginPathRide(id, areaId, waypoints, durationMs, trolley, label, checkpointIndex = null, trolleyOffsetY = 1.2, options = {}) {
+    if (!trolley) return beginManualTraversal(id, areaId, waypoints, durationMs, label, checkpointIndex, options);
     if (gameplay.ride || !gameplay.active || gameplay.activeAreaId !== areaId || !Array.isArray(waypoints) || waypoints.length < 2) return false;
     gameplay.mode = "ziplining";
     gameplay.ride = {
       id,
       kind: "path-course",
+      locksLocomotion: true,
       areaId,
       label,
       start: { ...waypoints[0] },
@@ -6367,6 +8892,8 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     gameplay.velocityX = 0;
     gameplay.velocityY = 0;
     gameplay.velocityZ = 0;
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
     handle.notify?.(options.startMessage || `🚣 ${label} スタート！ペダルで池を一周`);
     playTone(360, 0.14, "triangle");
     return true;
@@ -6382,11 +8909,13 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       gameplay.checkpoint = { ...start, id: `${id}-launch`, areaId, index: 0 };
     }
     gameplay.mode = "ziplining";
-    gameplay.ride = { id, kind: "long-zip", areaId, start: { ...start }, end: { ...end }, durationMs, startedAt: performance.now(), elapsedMs: 0, trolley, bodyYawOffset: 0 };
+    gameplay.ride = { id, kind: "long-zip", locksLocomotion: true, areaId, start: { ...start }, end: { ...end }, durationMs, startedAt: performance.now(), elapsedMs: 0, trolley, bodyYawOffset: 0 };
     gameplay.ziplineProgress = 0;
     gameplay.velocityX = 0;
     gameplay.velocityY = 0;
     gameplay.velocityZ = 0;
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
     handle.notify?.("🪂 ロングジップ出発！A/D・左右で操作ハンドルを使い体の向きを調整");
     playTone(340, 0.16, "triangle");
     return true;
@@ -6434,7 +8963,10 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       handle.playerRoot.rotation.y = travelYaw + (ride.steeringYawOffset || 0);
       if (ride.trolley && ride.kind === "path-course") ride.trolley.rotation.y = travelYaw + (ride.steeringYawOffset || 0);
     }
-    if (ride.trolley) ride.trolley.position.set(point.x, point.y + (ride.trolleyOffsetY ?? 1.2), point.z);
+    if (ride.trolley) {
+      ride.trolley.position.set(point.x, point.y + (ride.trolleyOffsetY ?? 1.2), point.z);
+      syncRideDynamicSurfaces(ride.trolley);
+    }
     gameplay.ziplineProgress = progress;
     const rideAreaId = ride.areaId || "zip-slide";
     const run = ensureAreaRun(rideAreaId);
@@ -6516,19 +9048,75 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
   function resolveHorizontal(previousX, previousZ, targetX, targetZ, y) {
     let x = clamp(targetX, FACILITY.bounds.minX + PLAYER_RADIUS, FACILITY.bounds.maxX - PLAYER_RADIUS);
     let z = clamp(targetZ, FACILITY.bounds.minZ + PLAYER_RADIUS, FACILITY.bounds.maxZ - PLAYER_RADIUS);
-    for (const blocker of blockers) {
-      if (y < blocker.minY - 0.2 || y > blocker.maxY + 0.2) continue;
-      if (!blockerContains(x, z, blocker, PLAYER_RADIUS)) continue;
-      const xOnlyBlocked = blockerContains(x, previousZ, blocker, PLAYER_RADIUS);
-      const zOnlyBlocked = blockerContains(previousX, z, blocker, PLAYER_RADIUS);
-      if (!xOnlyBlocked) z = previousZ;
-      else if (!zOnlyBlocked) x = previousX;
-      else {
-        x = previousX;
-        z = previousZ;
+    for (let pass = 0; pass < 3; pass += 1) {
+      let resolvedAny = false;
+      for (const blocker of blockers) {
+        const current = blockerState(blocker);
+        const vertical = blockerVerticalRange(blocker, current, x, z);
+        const playerMinY = y + 0.04;
+        const playerMaxY = y + PLAYER_COLLISION_HEIGHT;
+        if (playerMaxY <= vertical.minY + 0.025 || playerMinY >= vertical.maxY - 0.025) continue;
+        if (blocker.walkableTop && vertical.maxY <= y + MAX_STEP_HEIGHT && gameplay.velocityY <= 0.5) continue;
+        const broadRadius = Math.hypot(blocker.width, blocker.depth) / 2 + PLAYER_RADIUS;
+        if (Math.abs(x - current.x) > broadRadius || Math.abs(z - current.z) > broadRadius) continue;
+        if (!blockerContains(x, z, blocker, PLAYER_RADIUS, current)) continue;
+
+        if (blocker.shape === "circle") {
+          const radius = Math.max(blocker.width, blocker.depth) / 2 + PLAYER_RADIUS;
+          let normalX = x - current.x;
+          let normalZ = z - current.z;
+          let distance = Math.hypot(normalX, normalZ);
+          if (distance < 0.0001) {
+            normalX = previousX - current.x || 1;
+            normalZ = previousZ - current.z;
+            distance = Math.hypot(normalX, normalZ);
+          }
+          x = current.x + normalX / distance * (radius + 0.002);
+          z = current.z + normalZ / distance * (radius + 0.002);
+        } else {
+          const dx = x - current.x;
+          const dz = z - current.z;
+          let localX = dx * current.cos - dz * current.sin;
+          let localZ = dx * current.sin + dz * current.cos;
+          const halfWidth = blocker.width / 2 + PLAYER_RADIUS;
+          const halfDepth = blocker.depth / 2 + PLAYER_RADIUS;
+          const penetrationX = halfWidth - Math.abs(localX);
+          const penetrationZ = halfDepth - Math.abs(localZ);
+          if (penetrationX < penetrationZ) {
+            const previousLocalX = (previousX - current.x) * current.cos - (previousZ - current.z) * current.sin;
+            localX = (Math.sign(localX || previousLocalX || 1)) * (halfWidth + 0.002);
+          } else {
+            const previousLocalZ = (previousX - current.x) * current.sin + (previousZ - current.z) * current.cos;
+            localZ = (Math.sign(localZ || previousLocalZ || 1)) * (halfDepth + 0.002);
+          }
+          x = current.x + localX * current.cos + localZ * current.sin;
+          z = current.z - localX * current.sin + localZ * current.cos;
+        }
+        gameplay.lastCollisionId = blocker.id;
+        gameplay.collisionCount += 1;
+        resolvedAny = true;
       }
+      if (!resolvedAny) break;
     }
     return { x, z };
+  }
+
+  function resolveVerticalCeiling(x, z, previousFeetY, nextFeetY) {
+    if (nextFeetY <= previousFeetY) return nextFeetY;
+    const previousHeadY = previousFeetY + PLAYER_COLLISION_HEIGHT;
+    const nextHeadY = nextFeetY + PLAYER_COLLISION_HEIGHT;
+    let resolvedFeetY = nextFeetY;
+    for (const blocker of blockers) {
+      const current = blockerState(blocker);
+      const vertical = blockerVerticalRange(blocker, current, x, z);
+      if (previousHeadY > vertical.minY + 0.03 || nextHeadY < vertical.minY - 0.03) continue;
+      if (!blockerContains(x, z, blocker, PLAYER_RADIUS * 0.72, current)) continue;
+      resolvedFeetY = Math.min(resolvedFeetY, vertical.minY - PLAYER_COLLISION_HEIGHT - 0.015);
+      gameplay.velocityY = Math.min(0, gameplay.velocityY);
+      gameplay.lastCollisionId = blocker.id;
+      gameplay.collisionCount += 1;
+    }
+    return resolvedFeetY;
   }
 
   function setPlayerPositionDuringFrame(point) {
@@ -6564,14 +9152,38 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     });
   }
 
+  function objectIsWithin(object, ancestor) {
+    for (let current = object; current; current = current.parent) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  }
+
+  function syncRideDynamicSurfaces(trolley) {
+    if (!trolley) return;
+    trolley.updateWorldMatrix?.(true, true);
+    for (const surface of dynamicSurfaces) {
+      if (!surface.object || !objectIsWithin(surface.object, trolley)) continue;
+      surface.previousX = surface.x;
+      surface.previousY = surface.y;
+      surface.previousZ = surface.z;
+      const world = surface.object.getWorldPosition
+        ? surface.object.getWorldPosition(new constructors.Vector3())
+        : surface.object.position;
+      surface.x = world.x + surface.objectOffsetX;
+      surface.y = world.y + surface.objectOffsetY;
+      surface.z = world.z + surface.objectOffsetZ;
+    }
+  }
+
   function readMovementInput() {
     const bridge = handle.getMovementInput?.() || {};
     let horizontal = 0;
     let vertical = 0;
-    if (gameplay.keys.has("a") || gameplay.keys.has("arrowleft")) horizontal -= 1;
-    if (gameplay.keys.has("d") || gameplay.keys.has("arrowright")) horizontal += 1;
-    if (gameplay.keys.has("w") || gameplay.keys.has("arrowup")) vertical += 1;
-    if (gameplay.keys.has("s") || gameplay.keys.has("arrowdown")) vertical -= 1;
+    if (gameplay.keys.has("a") || gameplay.keys.has("arrowleft") || bridge.left) horizontal -= 1;
+    if (gameplay.keys.has("d") || gameplay.keys.has("arrowright") || bridge.right) horizontal += 1;
+    if (gameplay.keys.has("w") || gameplay.keys.has("arrowup") || bridge.forward) vertical += 1;
+    if (gameplay.keys.has("s") || gameplay.keys.has("arrowdown") || bridge.back || bridge.backward) vertical -= 1;
     horizontal += finite(bridge.touchX);
     vertical -= finite(bridge.touchY);
     const magnitude = Math.hypot(horizontal, vertical);
@@ -6582,21 +9194,134 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     return { horizontal, vertical };
   }
 
+  function manualTraversalPoint(ride, progress) {
+    const scaled = clamp(progress, 0, 1) * (ride.waypoints.length - 1);
+    const segmentIndex = Math.min(ride.waypoints.length - 2, Math.floor(scaled));
+    const segmentAmount = scaled - segmentIndex;
+    const from = ride.waypoints[segmentIndex];
+    const to = ride.waypoints[segmentIndex + 1];
+    return {
+      point: {
+        x: lerp(from.x, to.x, segmentAmount),
+        y: lerp(from.y, to.y, segmentAmount),
+        z: lerp(from.z, to.z, segmentAmount),
+      },
+      from,
+      to,
+    };
+  }
+
+  function finishManualTraversal(ride) {
+    gameplay.ride = null;
+    gameplay.ziplineProgress = 1;
+    gameplay.mode = "running";
+    gameplay.jumpQueued = false;
+    gameplay.jumpBufferUntil = 0;
+    setPlayerPosition(ride.end, { surfaceId: `${ride.id}-landing` });
+    const run = ensureAreaRun(ride.areaId);
+    if (Number.isInteger(ride.checkpointIndex)) {
+      const route = routeDefinitions.get(ride.areaId);
+      const checkpointPoint = route?.points?.[ride.checkpointIndex];
+      run.checkpointIndex = Math.max(run.checkpointIndex, ride.checkpointIndex);
+      run.reached.add(ride.checkpointIndex);
+      if (checkpointPoint) gameplay.checkpoint = { ...checkpointPoint, areaId: ride.areaId, index: ride.checkpointIndex };
+    }
+    handle.notify?.(`✨ ${ride.label} 自力クリア！`);
+    playTone(680, 0.18, "triangle");
+  }
+
+  function updateManualTraversal(now, deltaSeconds) {
+    const ride = gameplay.ride;
+    if (!ride || ride.kind !== "manual-path") return;
+    const previous = { ...handle.playerRoot.position };
+    const input = readMovementInput();
+    const durationSeconds = Math.max(1.4, ride.durationMs / 1000);
+    const progressSpeed = (gameplay.keys.has("shift") ? 1.45 : 1) / durationSeconds;
+    ride.progress = clamp(ride.progress + input.vertical * progressSpeed * deltaSeconds, 0, 1);
+    ride.lateralOffset = clamp(ride.lateralOffset + input.horizontal * deltaSeconds * 1.8, -0.72, 0.72);
+    if (Math.abs(input.horizontal) < 0.04) ride.lateralOffset *= Math.exp(-5.5 * deltaSeconds);
+
+    const jumpRequested = gameplay.jumpBufferUntil >= now;
+    if (jumpRequested && ride.hopOffset <= 0.001) {
+      ride.hopVelocity = JUMP_VELOCITY * 0.72;
+      gameplay.jumpCount += 1;
+      gameplay.jumpBufferUntil = 0;
+      playTone(310, 0.06, "square");
+    }
+    gameplay.jumpQueued = false;
+    if (ride.hopOffset > 0 || ride.hopVelocity > 0) {
+      ride.hopVelocity -= GRAVITY * deltaSeconds;
+      ride.hopOffset = Math.max(0, ride.hopOffset + ride.hopVelocity * deltaSeconds);
+      if (ride.hopOffset <= 0 && ride.hopVelocity < 0) ride.hopVelocity = 0;
+    }
+
+    const traversal = manualTraversalPoint(ride, ride.progress);
+    const segmentX = traversal.to.x - traversal.from.x;
+    const segmentZ = traversal.to.z - traversal.from.z;
+    const segmentLength = Math.max(0.001, Math.hypot(segmentX, segmentZ));
+    const lateralX = -segmentZ / segmentLength;
+    const lateralZ = segmentX / segmentLength;
+    const point = {
+      x: traversal.point.x + lateralX * ride.lateralOffset,
+      y: traversal.point.y + ride.hopOffset,
+      z: traversal.point.z + lateralZ * ride.lateralOffset,
+    };
+    if (ride.hopOffset > 0.001) {
+      const previousFeetY = previous.y - PLAYER_FOOT_OFFSET;
+      const desiredFeetY = point.y - PLAYER_FOOT_OFFSET;
+      const resolvedFeetY = resolveVerticalCeiling(
+        point.x,
+        point.z,
+        previousFeetY,
+        desiredFeetY,
+      );
+      if (resolvedFeetY < desiredFeetY - 0.001) {
+        point.y = resolvedFeetY + PLAYER_FOOT_OFFSET;
+        ride.hopOffset = Math.max(0, point.y - traversal.point.y);
+        ride.hopVelocity = Math.min(0, ride.hopVelocity);
+      }
+    }
+    setPlayerPositionDuringFrame(point);
+    const activeHazard = hazardAt(point.x, point.z);
+    if (activeHazard && point.y - PLAYER_FOOT_OFFSET < 0.04) {
+      requestRespawn(activeHazard.type || "water");
+      return;
+    }
+    handle.playerRoot.rotation.y = Math.atan2(segmentX, segmentZ);
+    gameplay.grounded = ride.hopOffset <= 0.001;
+    gameplay.currentSurfaceId = gameplay.grounded ? `${ride.id}-manual-guide` : null;
+    gameplay.velocityY = ride.hopVelocity;
+    if (gameplay.grounded) gameplay.lastGroundedAt = now;
+    gameplay.distanceTravelled += Math.hypot(point.x - previous.x, point.z - previous.z);
+    ride.elapsedMs += deltaSeconds * 1000;
+    gameplay.ziplineProgress = ride.progress;
+    ensureAreaRun(ride.areaId).elapsedMs += deltaSeconds * 1000;
+    if (ride.progress >= 0.999 && input.vertical > 0) finishManualTraversal(ride);
+  }
+
   function updateManualPhysics(now, deltaSeconds) {
     if (gameplay.mode === "respawning") {
       if (now >= gameplay.respawnAt) finishRespawn();
       return;
     }
-    if (gameplay.ride) {
+    if (gameplay.ride?.locksLocomotion) {
       updateZipRide(now, deltaSeconds * 1000);
+      return;
+    }
+    if (gameplay.ride?.kind === "manual-path") {
+      updateManualTraversal(now, deltaSeconds);
       return;
     }
     if (window.__voxcelMap?.isOpen) return;
 
-    applyDynamicSurfaceCarry();
     const player = handle.playerRoot.position;
     const previous = { x: player.x, y: player.y, z: player.z };
     const previousFeetY = previous.y - PLAYER_FOOT_OFFSET;
+    if (gameplay.grounded) {
+      gameplay.fallOriginY = gameplay.currentSurfaceId && gameplay.currentSurfaceId !== "ground"
+        ? previousFeetY
+        : null;
+    }
     const input = readMovementInput();
     const sprinting = gameplay.keys.has("shift");
     const speed = sprinting ? SPRINT_SPEED : WALK_SPEED;
@@ -6615,14 +9340,20 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       gameplay.velocityZ *= friction;
     }
 
-    if (gameplay.jumpQueued && gameplay.grounded) {
+    if (gameplay.grounded) gameplay.lastGroundedAt = now;
+    const bufferedJump = gameplay.jumpBufferUntil >= now;
+    const canJump = gameplay.grounded || now - gameplay.lastGroundedAt <= COYOTE_TIME_MS;
+    if (bufferedJump && canJump) {
+      gameplay.fallOriginY = previousFeetY;
       gameplay.velocityY = JUMP_VELOCITY;
       gameplay.grounded = false;
       gameplay.currentSurfaceId = null;
       gameplay.jumpCount += 1;
+      gameplay.jumpBufferUntil = 0;
       playTone(310, 0.06, "square");
     }
     gameplay.jumpQueued = false;
+    if (gameplay.jumpBufferUntil < now) gameplay.jumpBufferUntil = 0;
     if (!gameplay.grounded) gameplay.velocityY -= GRAVITY * deltaSeconds;
 
     const horizontal = resolveHorizontal(
@@ -6633,6 +9364,20 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       previousFeetY,
     );
     let nextFeetY = previousFeetY + gameplay.velocityY * deltaSeconds;
+    nextFeetY = resolveVerticalCeiling(horizontal.x, horizontal.z, previousFeetY, nextFeetY);
+    if (
+      gameplay.fallOriginY !== null
+      && gameplay.velocityY < 0
+      && gameplay.fallOriginY - nextFeetY > 3.6
+    ) {
+      setPlayerPositionDuringFrame({
+        x: horizontal.x,
+        y: nextFeetY + PLAYER_FOOT_OFFSET,
+        z: horizontal.z,
+      });
+      requestRespawn("fall");
+      return;
+    }
     let landedSurface = null;
     const candidates = surfaceCandidates(horizontal.x, horizontal.z);
     if (gameplay.velocityY <= 0) {
@@ -6652,14 +9397,17 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       }
     }
     if (gameplay.grounded && !landedSurface) {
-      const support = supportBelow(horizontal.x, horizontal.z, previousFeetY, 0.78);
-      if (support && Math.abs(support.y - previousFeetY) <= 0.78) {
+      const supportAllowance = MAX_STEP_HEIGHT + 0.06;
+      const support = supportBelow(horizontal.x, horizontal.z, previousFeetY, supportAllowance);
+      if (support && Math.abs(support.y - previousFeetY) <= supportAllowance) {
         nextFeetY = support.y;
         landedSurface = support.surface;
       }
     }
     if (landedSurface) {
       gameplay.grounded = true;
+      gameplay.lastGroundedAt = now;
+      gameplay.fallOriginY = null;
       gameplay.velocityY = 0;
       gameplay.currentSurfaceId = landedSurface.id;
       if (landedSurface.trampoline) {
@@ -6670,6 +9418,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
         window.setTimeout(() => playTone(420, 0.08, "sine"), 60);
       }
     } else {
+      if (gameplay.fallOriginY === null) gameplay.fallOriginY = previousFeetY;
       gameplay.grounded = false;
       gameplay.currentSurfaceId = null;
     }
@@ -6739,7 +9488,10 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
   function activateNearestInteraction() {
     const interaction = interactions.find((candidate) => candidate.id === gameplay.nearestInteractionId) || nearestInteraction();
     if (!interaction) {
-      if (gameplay.active) gameplay.jumpQueued = true;
+      if (gameplay.active && !gameplay.ride?.locksLocomotion) {
+        gameplay.jumpQueued = true;
+        gameplay.jumpBufferUntil = performance.now() + JUMP_BUFFER_MS;
+      }
       return false;
     }
     return interaction.activate?.() !== false;
@@ -6773,9 +9525,20 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     const route = gameplay.activeAreaId ? routeDefinitions.get(gameplay.activeAreaId) : null;
     const run = gameplay.activeAreaId ? ensureAreaRun(gameplay.activeAreaId) : null;
     const currentPoint = route && run ? route.points[run.checkpointIndex] : null;
-    hud.querySelector("[data-athletic-area]").textContent = route
-      ? `${route.area.icon} ${route.area.name}　${run.checkpointIndex + 1}/${route.points.length} ${currentPoint?.name || route.area.japanese}`
+    const manualRide = gameplay.ride?.kind === "manual-path" ? gameplay.ride : null;
+    hud.querySelector("[data-athletic-area]").textContent = manualRide
+      ? `🧗 ${manualRide.label}　${Math.round(manualRide.progress * 100)}%`
+      : route
+        ? `${route.area.icon} ${route.area.name}　${run.checkpointIndex + 1}/${route.points.length} ${currentPoint?.name || route.area.japanese}`
       : gameplay.mode === "respawning" ? "チェックポイントへ復帰中…" : "自由探索 — 下のコースを選択";
+    const help = hud.querySelector("[data-athletic-help]");
+    if (help) {
+      help.textContent = manualRide
+        ? "W/S：進む・戻る　A/D：姿勢調整　SPACE：ジャンプ　SHIFT：ダッシュ　R：復帰"
+        : gameplay.ride?.locksLocomotion
+          ? "A/D・左右：乗り物を操作　着地まで移動・ジャンプ入力はロック"
+          : "WASD / 矢印：移動　SPACE：ジャンプ　SHIFT：ダッシュ　E：操作　R：復帰　ESC：退出";
+    }
     hud.querySelector("[data-athletic-time]").textContent = formatTime(run?.elapsedMs || 0);
     hud.querySelector("[data-athletic-clear]").textContent = `${gameplay.completedAreas.size}/${AREA_DEFINITIONS.length}`;
     const progress = route && run ? (run.checkpointIndex / Math.max(1, route.points.length - 1)) * 100 : (gameplay.completedAreas.size / AREA_DEFINITIONS.length) * 100;
@@ -6789,6 +9552,8 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
   function releaseAllKeys() {
     gameplay.keys.clear();
     gameplay.jumpQueued = false;
+    gameplay.jumpHeld = false;
+    gameplay.jumpBufferUntil = 0;
     for (const key of ["w", "a", "s", "d", "Shift", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) {
       window.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
     }
@@ -6796,6 +9561,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
 
   function handleKeyDown(event) {
     const key = String(event.key || "").toLowerCase();
+    const isJumpKey = key === " " || key === "spacebar" || String(event.code || "").toLowerCase() === "space";
     if (!gameplay.active) {
       if (key === "e" && !event.repeat && nearestInteraction()?.id === "enter-adventure") {
         event.preventDefault();
@@ -6805,12 +9571,18 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       return;
     }
     if (window.__voxcelMap?.isOpen) return;
-    const controlled = new Set(["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift", " ", "spacebar", "e", "r", "escape"]);
-    if (!controlled.has(key)) return;
+    const controlled = new Set(["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift", "e", "r", "escape"]);
+    if (!controlled.has(key) && !isJumpKey) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift"].includes(key)) gameplay.keys.add(key);
-    if ((key === " " || key === "spacebar") && !event.repeat) gameplay.jumpQueued = true;
+    if (isJumpKey) {
+      gameplay.jumpHeld = true;
+      if (!event.repeat && !gameplay.ride?.locksLocomotion) {
+        gameplay.jumpQueued = true;
+        gameplay.jumpBufferUntil = performance.now() + JUMP_BUFFER_MS;
+      }
+    }
     if (key === "e" && !event.repeat) activateNearestInteraction();
     if (key === "r" && !event.repeat) requestRespawn("manual");
     if (key === "escape" && !event.repeat) exitPlayMode();
@@ -6819,6 +9591,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
   function handleKeyUp(event) {
     const key = String(event.key || "").toLowerCase();
     gameplay.keys.delete(key);
+    if (key === " " || key === "spacebar" || String(event.code || "").toLowerCase() === "space") gameplay.jumpHeld = false;
   }
 
   function updateAnimations(now) {
@@ -6872,6 +9645,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       }
       const frameMs = now - (gameplay.lastUpdateAt || now);
       const deltaMs = frameMs > 500 ? 0 : clamp(frameMs, 0, 250);
+      if (!gameplay.ride && deltaMs > 0) applyDynamicSurfaceCarry();
       let remainingSeconds = deltaMs / 1000;
       while (remainingSeconds > 0) {
         const stepSeconds = Math.min(1 / 60, remainingSeconds);
@@ -6926,7 +9700,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       id: FACILITY.legacyId,
       canonicalId: FACILITY.id,
       name: FACILITY.name,
-      controlMode: "manual",
+      controlMode: "manual-physics-v4",
       fieldExpanded: true,
       facility: {
         id: FACILITY.legacyId,
@@ -6961,6 +9735,9 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       meshCount: state.meshCount,
       solidMeshCount: state.solidMeshCount,
       decorativeMeshCount: state.decorativeMeshCount,
+      staticBatching: root?.userData?.voxcelStaticBatching
+        ? { ...root.userData.voxcelStaticBatching, componentCounts: { ...(root.userData.voxcelStaticBatching.componentCounts || {}) } }
+        : null,
       materialCount: state.materialCount,
       textureCount: state.textureCount,
       animationCount: state.animationCount,
@@ -6968,6 +9745,14 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       surfaceCount: state.surfaceCount,
       hazardCount: state.hazardCount,
       blockerCount: state.blockerCount,
+      collisionModel: {
+        shape: "capsule",
+        radius: PLAYER_RADIUS,
+        height: PLAYER_COLLISION_HEIGHT,
+        maxStepHeight: MAX_STEP_HEIGHT,
+        jumpBufferMs: JUMP_BUFFER_MS,
+        coyoteTimeMs: COYOTE_TIME_MS,
+      },
       officialAttractionCount: state.officialAttractionCount,
       officialAttractionMeshCount: state.officialAttractionMeshCount,
       officialAttractions: officialRepresentations.map((representation) => ({
@@ -7011,6 +9796,8 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
         stairStepCount: representation.stairStepCount ?? null,
         stairTurnCount: representation.stairTurnCount ?? null,
         deckHeightMeters: representation.deckHeightMeters ?? null,
+        collisionGuideCount: representation.collisionGuideCount ?? null,
+        collisionGuideSpacingMeters: representation.collisionGuideSpacingMeters ?? null,
         rideLength: representation.rideLength ?? null,
         rideDurationMs: representation.rideDurationMs ?? null,
         x: representation.x,
@@ -7028,6 +9815,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       gameplayMode: gameplay.mode,
       playModeActive: gameplay.active,
       grounded: gameplay.grounded,
+      currentSurfaceId: gameplay.currentSurfaceId,
       verticalVelocity: gameplay.velocityY,
       activeChallenge: gameplay.activeAreaId,
       elapsedMs: activeRun?.elapsedMs || 0,
@@ -7040,10 +9828,15 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
       respawnCount: gameplay.respawnCount,
       lastRespawnReason: gameplay.lastRespawnReason,
       jumpCount: gameplay.jumpCount,
+      jumpBuffered: gameplay.jumpBufferUntil >= performance.now(),
       distanceTravelled: gameplay.distanceTravelled,
+      collisionCount: gameplay.collisionCount,
+      lastCollisionId: gameplay.lastCollisionId,
       ziplineProgress: gameplay.ziplineProgress,
       activeRideId: gameplay.ride?.id || null,
       activeRideKind: gameplay.ride?.kind || null,
+      activeRideLocksLocomotion: Boolean(gameplay.ride?.locksLocomotion),
+      manualTraversalProgress: gameplay.ride?.kind === "manual-path" ? gameplay.ride.progress : null,
       bodyYawOffset: gameplay.ride?.bodyYawOffset ?? null,
       interactionCount: interactions.length,
       nearestInteraction: gameplay.nearestInteractionId,
@@ -7109,6 +9902,7 @@ body.voxcel-athletic-playing #voxcelAthleticAction{bottom:88px}
     registerEntryInteraction();
     installUi();
     registerMapLocation();
+    flushOfficialStaticInstanceBatches();
     handle.scene.updateMatrixWorld(true);
     window.__voxcelEnhancements.refreshColliders();
 
