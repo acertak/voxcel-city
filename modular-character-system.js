@@ -1,8 +1,6 @@
 const MODEL_URL = new URL("./models/modular-character-parts.glb", import.meta.url).href;
-const PLAYER_SCALE = 1.56;
-const PLAYER_Y_OFFSET = -1.463;
-const NPC_SCALE = 1.2;
-const NPC_Y_OFFSET = -1.122;
+const CHARACTER_SCALE = 1.2;
+const CHARACTER_Y_OFFSET = -1.122;
 const EXPECTED_GEOMETRY_COUNT = 44;
 const INSTANCE_CAPACITY = 36;
 const DYNAMIC_DRAW_USAGE = 35048;
@@ -451,8 +449,8 @@ function buildPlayer() {
 
   const avatar = new THREE_CORE.Group();
   avatar.name = "VoxcelModularPlayer";
-  avatar.position.y = PLAYER_Y_OFFSET;
-  avatar.scale.setScalar(PLAYER_SCALE);
+  avatar.position.y = CHARACTER_Y_OFFSET;
+  avatar.scale.setScalar(CHARACTER_SCALE);
   avatar.userData.voxcelReplacement = true;
   avatar.userData.voxcelCharacterRoot = true;
   avatar.userData.collisionMode = "none";
@@ -677,7 +675,7 @@ function animatePlayer(now) {
   parts.elbows[1].rotation.x = Math.max(0, -swing) * 0.18;
   parts.knees[0].rotation.x = Math.max(0, -swing) * 0.5;
   parts.knees[1].rotation.x = Math.max(0, swing) * 0.5;
-  runtime.playerRoot.position.y = PLAYER_Y_OFFSET + bob;
+  runtime.playerRoot.position.y = CHARACTER_Y_OFFSET + bob;
 }
 
 function makeNpcAppearance(index) {
@@ -753,8 +751,8 @@ function initializeScratchObjects() {
   runtime.playerWorldPosition = new THREE_CORE.Vector3();
   runtime.lastPlayerPosition = new THREE_CORE.Vector3();
   npcBaseOffset = new THREE_CORE.Matrix4()
-    .makeTranslation(0, NPC_Y_OFFSET, 0)
-    .scale(new THREE_CORE.Vector3(NPC_SCALE, NPC_SCALE, NPC_SCALE));
+    .makeTranslation(0, CHARACTER_Y_OFFSET, 0)
+    .scale(new THREE_CORE.Vector3(CHARACTER_SCALE, CHARACTER_SCALE, CHARACTER_SCALE));
   npcColor = new THREE_CORE.Color();
   npcBaseWorld = new THREE_CORE.Matrix4();
   npcLocal = new THREE_CORE.Matrix4();
@@ -1134,10 +1132,11 @@ function publicState() {
       },
       animation: runtime.playerAnimation,
       speed: Math.round(runtime.playerSpeed * 100) / 100,
-      scale: PLAYER_SCALE,
+      scale: CHARACTER_SCALE,
     },
     npcs: {
       count: runtime.npcAppearances.length,
+      scale: CHARACTER_SCALE,
       visibleCount: runtime.visibleNpcCount,
       legacyVisualsHidden: legacyNpcVisualsHidden(),
       appearances: runtime.npcAppearances.map((appearance) => ({ ...appearance })),

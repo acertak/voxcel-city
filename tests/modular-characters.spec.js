@@ -77,6 +77,7 @@ test.describe("modular characters", () => {
       mounted: true,
       attached: true,
       rootCount: 1,
+      scale: 1.2,
       visibleMeshCount: 19,
       appearance: {
         hairId: 0,
@@ -230,6 +231,7 @@ test.describe("modular characters", () => {
 
     expect(state.npcs).toMatchObject({
       count: 18,
+      scale: state.player.scale,
       visibleCount: 18,
       legacyVisualsHidden: true,
       distinctSignatures: 18,
