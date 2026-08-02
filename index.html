@@ -87,11 +87,12 @@ hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
 🏪 お店の中に入って買い物＆バイト<br>👗 服屋・💇 美容院で着替え＆イメチェン<br>
 🛋️ 家具屋で買って自宅に配置<br>🏠 自宅でクローゼット・冷蔵庫・ベッドを使おう<br>
 🚗 車や人が行き交う街を探索・🌅 昼夜サイクル<br>
+🚌 外周の環状線バスは乗るだけで自動運転・⤴ 走りながらジャンプ<br>
 🚓 違反すると指名手配、逮捕されると牢屋で1日過ごす<br>
-📱 画面左半分をドラッグして移動 / 右半分をドラッグして視点移動
+📱 画面左半分をドラッグして移動 / 右半分をドラッグして視点移動 / ⤴ボタンでジャンプ
 </div>
 <button class="sb2" id="goBtn">ゲーム開始</button>
-<div style="margin-top:10px;font-size:10px;opacity:.4">WASD移動 / 車ではWASD運転 / マウス視点 / E操作</div>
+<div style="margin-top:10px;font-size:10px;opacity:.4">WASD移動 / Spaceジャンプ / 車ではWASD運転・バスは自動運転 / マウス視点 / E操作</div>
 </div></div>
 <div class="hud" id="hud" style="display:none">
 <div class="hp"><div class="ht">Block City Life</div><div class="hr"><span>💰</span><strong id="hM">5000</strong><span>📅</span><strong id="hD">1日目</strong></div></div>
@@ -3813,6 +3814,8 @@ void main() {
 <script src="/streetscape-detail-system.js"></script>
 <script src="/vehicle-detail-system.js"></script>
 <script src="/city-map-system.js"></script>
+<script src="/ring-road-system.js"></script>
+<script src="/player-jump-system.js"></script>
 <script src="/athletic-park-system.js"></script>
 <script type="module" src="/modular-character-system.js"></script>
 </body>
