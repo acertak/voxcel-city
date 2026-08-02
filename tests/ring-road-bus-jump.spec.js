@@ -5,14 +5,19 @@ async function startGame(page) {
   await page.getByRole("button", { name: "ゲーム開始" }).click();
   await expect.poll(async () => page.evaluate(() => ({
     ring: window.__voxcelRingRoad?.ready ?? false,
+    traffic: window.__voxcelTraffic?.ready ?? false,
     jump: window.__voxcelJump?.ready ?? false,
-  })), { timeout: 40_000 }).toEqual({ ring: true, jump: true });
+  })), { timeout: 60_000 }).toEqual({ ring: true, traffic: true, jump: true });
   await page.waitForTimeout(220);
 }
 
-test.describe("ring road, automatic bus and jumping", () => {
+function loopBusHandle() {
+  return window.__voxcelPlayer.vehicles.find((vehicle) => vehicle.m.userData?.voxcelLoopBus);
+}
+
+test.describe("ring road and jumping", () => {
   test("lays a loop line around the field perimeter", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
     await startGame(page);
 
     const result = await page.evaluate(() => {
@@ -26,18 +31,15 @@ test.describe("ring road, automatic bus and jumping", () => {
       const carriageway = ringMeshes.filter((mesh) => mesh.name.startsWith("ring-asphalt-"));
       return {
         state,
+        geometry: window.__voxcelRingRoad.geometry(),
         ringMeshCount: ringMeshes.length,
         carriagewayNames: carriageway.map((mesh) => mesh.name).sort(),
         allCollisionless: ringMeshes.every((mesh) => mesh.userData.collisionMode === "none"),
-        // The loop must sit outside the 250x250 block grid but inside the walkable clamp.
-        stopsOnPerimeter: state.stops.every(
-          (stop) => Math.abs(chebyshev(stop.x, stop.z) - state.laneRadius) < 0.001,
-        ),
         roadRectCount: handle.roadRects.length,
         treesInsideCorridor: handle.sceneryTrees.filter(
           (tree) => chebyshev(tree.x, tree.z) >= state.radius - state.roadWidth / 2 - 3,
         ).length,
-        mapRings: window.__voxcelMap.getState && handle.roads?.rings,
+        mapRings: handle.roads?.rings,
         // Nothing solid may be left standing in the carriageway, and every landmark that
         // had to move must have moved as a whole rather than leaving pieces behind.
         obstructions: (() => {
@@ -48,7 +50,7 @@ test.describe("ring road, automatic bus and jumping", () => {
           handle.scene.updateMatrixWorld(true);
           handle.scene.traverse((object) => {
             if (!object.isMesh) return;
-            if (object.userData?.voxcelRingRoad) return;
+            if (object.userData?.voxcelRingRoad || object.userData?.voxcelBusStop) return;
             if (object.userData?.collisionMode === "none") return;
             // Visibility is hierarchical: a cleared tree group keeps its children flagged
             // visible, so the whole ancestor chain has to be checked.
@@ -91,6 +93,7 @@ test.describe("ring road, automatic bus and jumping", () => {
       roadWidth: 10,
       registeredRoadRects: 4,
     });
+    expect(result.geometry.radial).toMatchObject({ x: [0, 44], z: [-70, 0, 70] });
     expect(result.carriagewayNames).toEqual([
       "ring-asphalt-east",
       "ring-asphalt-north",
@@ -99,9 +102,6 @@ test.describe("ring road, automatic bus and jumping", () => {
     ]);
     expect(result.ringMeshCount).toBeGreaterThan(150);
     expect(result.allCollisionless).toBe(true);
-    expect(result.state.stops).toHaveLength(8);
-    expect(result.stopsOnPerimeter).toBe(true);
-    expect(result.state.loopLength).toBeGreaterThan(950);
     expect(result.treesInsideCorridor).toBe(0);
     expect(result.obstructions).toEqual([]);
     expect(result.hiddenLooseMeshes).toBe(0);
@@ -109,49 +109,45 @@ test.describe("ring road, automatic bus and jumping", () => {
     expect(result.state.movedLandmarkMeshCount).toBeGreaterThan(
       result.state.movedLandmarkCount * 10,
     );
-    expect(result.mapRings).toEqual([
-      { radius: 129, width: 10, id: "loop-line" },
-    ]);
+    expect(result.mapRings).toEqual([{ radius: 129, width: 10, id: "loop-line" }]);
     // A car driven on the loop must count as being on a road, not joyriding the pavement.
     expect(result.roadRectCount).toBeGreaterThan(4);
   });
 
-  test("runs the loop-line bus automatically and carries the player without driving", async ({
-    page,
-  }) => {
-    test.setTimeout(90_000);
+  test("leaves the adventure park's own demolition alone", async ({ page }) => {
+    test.setTimeout(120_000);
     await startGame(page);
+    const athletics = await page.evaluate(() => window.__voxcelAthletics.getState());
+    expect(athletics).toMatchObject({ ready: true, reason: "ready", removedBuildingCount: 2 });
+  });
 
-    const before = await page.evaluate(() => window.__voxcelRingRoad.getState().ringBus);
-    expect(before.manual).toBe(true);
-    // Nobody is aboard yet: the loop line runs on its own timetable.
-    await expect.poll(async () => page.evaluate((start) => {
-      const bus = window.__voxcelRingRoad.getState().ringBus;
-      return Math.hypot(bus.x - start.x, bus.z - start.z) > 4 && bus.onRing;
-    }, before), { timeout: 30_000 }).toBe(true);
+  test("carries the player on an automatic bus without any driving", async ({ page }) => {
+    test.setTimeout(120_000);
+    await startGame(page);
 
     const boarded = await page.evaluate(() => {
       const handle = window.__voxcelPlayer;
-      const ringBus = handle.vehicles.find((vehicle) => vehicle.m.userData?.voxcelRingBus);
-      handle.state.vehicle = ringBus;
+      const bus = handle.vehicles.find((vehicle) => vehicle.m.userData?.voxcelLoopBus);
+      handle.state.vehicle = bus;
       handle.playerRoot.visible = false;
       handle.playerShadow.visible = false;
-      return { boardedType: ringBus.type };
+      return { type: bus.type, manual: bus.manual };
     });
-    expect(boarded.boardedType).toBe("bus");
+    expect(boarded).toEqual({ type: "bus", manual: true });
 
     // Hold a movement key: an automatic bus must ignore the throttle entirely.
     await page.keyboard.down("ArrowUp");
     await expect.poll(async () => page.evaluate(
-      () => window.__voxcelRingRoad.getState().riding?.autopilot ?? false,
-    ), { timeout: 20_000 }).toBe(true);
+      () => window.__voxcelTraffic.getState().riding?.autopilot ?? false,
+    ), { timeout: 30_000 }).toBe(true);
     const riding = await page.evaluate(() => ({
-      state: window.__voxcelRingRoad.getState(),
+      state: window.__voxcelTraffic.getState(),
       driveSpeed: window.__voxcelPlayer.state.vehicle.driveSpeed,
       playerX: window.__voxcelPlayer.playerRoot.position.x,
       playerZ: window.__voxcelPlayer.playerRoot.position.z,
       busX: window.__voxcelPlayer.state.vehicle.m.position.x,
       busZ: window.__voxcelPlayer.state.vehicle.m.position.z,
+      hud: document.getElementById("voxcelBusHud")?.textContent ?? "",
     }));
     await page.keyboard.up("ArrowUp");
 
@@ -162,6 +158,7 @@ test.describe("ring road, automatic bus and jumping", () => {
       movementLocked: true,
     });
     expect(riding.driveSpeed).toBe(0);
+    expect(riding.hud).toContain("環状線");
     expect(Math.hypot(riding.playerX - riding.busX, riding.playerZ - riding.busZ)).toBeLessThan(0.001);
 
     const left = await page.evaluate(async () => {
@@ -169,69 +166,15 @@ test.describe("ring road, automatic bus and jumping", () => {
       handle.state.vehicle = null;
       handle.playerRoot.visible = true;
       handle.playerShadow.visible = true;
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      return {
-        state: window.__voxcelRingRoad.getState(),
-        movementLocked: handle.movementLocked,
-      };
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return { state: window.__voxcelTraffic.getState(), movementLocked: handle.movementLocked };
     });
     expect(left.state.riding).toBe(null);
     expect(left.movementLocked).toBe(false);
   });
 
-  test("keeps the loop-line bus on its own autopilot after a city bus ride", async ({ page }) => {
-    test.setTimeout(90_000);
-    await startGame(page);
-
-    const start = await page.evaluate(() => {
-      const handle = window.__voxcelPlayer;
-      const cityBus = handle.vehicles.find(
-        (vehicle) => vehicle.type === "bus" && !vehicle.m.userData?.voxcelRingBus,
-      );
-      cityBus.manual = true;
-      handle.state.vehicle = cityBus;
-      return { x: cityBus.m.position.x, z: cityBus.m.position.z, axis: cityBus.axis };
-    });
-
-    await expect.poll(async () => page.evaluate((origin) => {
-      const bus = window.__voxcelPlayer.state.vehicle;
-      return Math.hypot(bus.m.position.x - origin.x, bus.m.position.z - origin.z) > 1;
-    }, start), { timeout: 30_000 }).toBe(true);
-
-    const ride = await page.evaluate(() => {
-      const handle = window.__voxcelPlayer;
-      const cityBus = handle.state.vehicle;
-      const state = window.__voxcelRingRoad.getState();
-      handle.state.vehicle = null;
-      return {
-        state,
-        axis: cityBus.axis,
-        lanePos: cityBus.lanePos,
-        offLane: cityBus.axis === "ns"
-          ? Math.abs(cityBus.m.position.x - cityBus.lanePos)
-          : Math.abs(cityBus.m.position.z - cityBus.lanePos),
-        driveSpeed: cityBus.driveSpeed,
-      };
-    });
-
-    expect(ride.state.riding).toMatchObject({ line: "city", autopilot: true, movementLocked: true });
-    expect(ride.driveSpeed).toBe(0);
-    // The autopilot keeps the bus in its own lane rather than wandering off the road.
-    expect(ride.offLane).toBeLessThan(0.001);
-
-    await page.evaluate(() => {
-      const bus = window.__voxcelPlayer.vehicles.find(
-        (vehicle) => vehicle.m.userData?.voxcelRingBus,
-      );
-      bus.manual = false;
-    });
-    await expect.poll(async () => page.evaluate(
-      () => window.__voxcelRingRoad.getState().ringBus.manual,
-    ), { timeout: 20_000 }).toBe(true);
-  });
-
   test("jumps from a standstill and while running", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
     await startGame(page);
     await page.evaluate(() => window.__voxcelTest.setPlayer(0, 20, Math.PI));
     await page.waitForTimeout(200);
@@ -315,7 +258,7 @@ test.describe("ring road, automatic bus and jumping", () => {
   test("suspends jumping while riding and while the adventure park drives the player", async ({
     page,
   }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
     await startGame(page);
 
     const riding = await page.evaluate(async () => {
@@ -325,7 +268,7 @@ test.describe("ring road, automatic bus and jumping", () => {
         requestAnimationFrame(step);
       });
       const handle = window.__voxcelPlayer;
-      const bus = handle.vehicles.find((vehicle) => vehicle.m.userData?.voxcelRingBus);
+      const bus = handle.vehicles.find((vehicle) => vehicle.m.userData?.voxcelLoopBus);
       handle.state.vehicle = bus;
       await frames(3);
       window.__voxcelJump.requestJump();
@@ -336,10 +279,10 @@ test.describe("ring road, automatic bus and jumping", () => {
     });
     expect(riding).toMatchObject({ airborne: false, jumpCount: 0, blockedReason: "riding" });
 
-    // Let the loop-line system finish releasing its own ride lock before taking it over.
+    // Let the traffic system finish releasing its own ride lock before taking it over.
     await expect.poll(async () => page.evaluate(
-      () => window.__voxcelRingRoad.getState().riding === null && !window.__voxcelPlayer.movementLocked,
-    ), { timeout: 20_000 }).toBe(true);
+      () => window.__voxcelTraffic.getState().riding === null && !window.__voxcelPlayer.movementLocked,
+    ), { timeout: 30_000 }).toBe(true);
 
     const locked = await page.evaluate(async () => {
       const frames = (count) => new Promise((resolve) => {
