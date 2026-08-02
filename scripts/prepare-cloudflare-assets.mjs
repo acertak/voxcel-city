@@ -8,7 +8,7 @@ const output = join(root, ".cloudflare-assets");
 const playerHandle =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
 const enhancedPlayerHandle =
-  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,trafficLights:de,stopLines:J8,movementLocked:!1,getMovementInput:()=>({left:!!(me.a||me.arrowleft),right:!!(me.d||me.arrowright),forward:!!(me.w||me.arrowup),backward:!!(me.s||me.arrowdown),touchX:z4?W8.x:0,touchY:z4?W8.y:0}),setMovementLocked:(locked)=>{window.__voxcelPlayer.movementLocked=!!locked},getCameraYaw:()=>be,setCameraYaw:(yaw)=>{if(Number.isFinite(yaw))be=yaw},getCameraState:()=>({yaw:be,pitch:De,distance:bD,targetDistance:A8}),setCameraState:(next={})=>{Number.isFinite(next.yaw)&&(be=next.yaw),Number.isFinite(next.pitch)&&(De=Math.max(-.3,Math.min(1.2,next.pitch))),Number.isFinite(next.distance)&&(bD=Math.max(4,Math.min(260,next.distance))),Number.isFinite(next.targetDistance)&&(A8=Math.max(4,Math.min(260,next.targetDistance)))},enterBuilding:c4,exitBuilding:ug,notify:PP}";
+  "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t,pedestrians:Mg,camera:qt,renderer:Me,state:u,buildings:it,buildingViews:Je,entrances:_s,decorativeBuildings:HD,vehicles:wt,trafficLights:de,stopLines:J8,roadRects:Ks,sceneryTrees:Xs,movementLocked:!1,getMovementInput:()=>({left:!!(me.a||me.arrowleft),right:!!(me.d||me.arrowright),forward:!!(me.w||me.arrowup),backward:!!(me.s||me.arrowdown),touchX:z4?W8.x:0,touchY:z4?W8.y:0}),setMovementLocked:(locked)=>{window.__voxcelPlayer.movementLocked=!!locked},getCameraYaw:()=>be,setCameraYaw:(yaw)=>{if(Number.isFinite(yaw))be=yaw},getCameraState:()=>({yaw:be,pitch:De,distance:bD,targetDistance:A8}),setCameraState:(next={})=>{Number.isFinite(next.yaw)&&(be=next.yaw),Number.isFinite(next.pitch)&&(De=Math.max(-.3,Math.min(1.2,next.pitch))),Number.isFinite(next.distance)&&(bD=Math.max(4,Math.min(260,next.distance))),Number.isFinite(next.targetDistance)&&(A8=Math.max(4,Math.min(260,next.targetDistance)))},enterBuilding:c4,exitBuilding:ug,notify:PP}";
 const baseMovementInput = "z4&&(P+=W8.x,e-=W8.y),ka(t,A)";
 const lockableMovementInput =
   "z4&&(P+=W8.x,e-=W8.y),window.__voxcelPlayer?.movementLocked&&(P=0,e=0),ka(t,A)";
@@ -23,6 +23,8 @@ for (const name of [
   "building-frontage-system.js",
   "streetscape-detail-system.js",
   "city-map-system.js",
+  "ring-road-system.js",
+  "player-jump-system.js",
   "athletic-park-system.js",
   "modular-character-system.js",
   "vehicle-detail-system.js",

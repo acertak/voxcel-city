@@ -654,18 +654,40 @@ function animatePlayer(now) {
   const dt = runtime.lastFrameTime
     ? clamp((now - runtime.lastFrameTime) / 1000, 0.001, 0.05)
     : 1 / 60;
+  const jump = window.__voxcelJump;
+  const airborne = Boolean(jump?.airborne);
+  // Ignore the vertical leg of a jump so the ground speed keeps driving the walk cycle.
+  const groundSpeed = Math.hypot(
+    currentPosition.x - runtime.lastPlayerPosition.x,
+    currentPosition.z - runtime.lastPlayerPosition.z,
+  ) / dt;
   const speed = currentPosition.distanceTo(runtime.lastPlayerPosition) / dt;
   runtime.lastFrameTime = now;
   runtime.lastPlayerPosition.copy(currentPosition);
   runtime.playerSpeed = Number.isFinite(speed) ? speed : 0;
 
-  const moving = speed > 0.18 && speed < 45;
-  const running = moving && speed > 12;
-  runtime.playerAnimation = running ? "run" : moving ? "walk" : "idle";
+  const moving = groundSpeed > 0.18 && groundSpeed < 45;
+  const running = moving && groundSpeed > 12;
+  runtime.playerAnimation = airborne ? "jump" : running ? "run" : moving ? "walk" : "idle";
   const targetAmplitude = running ? 0.82 : moving ? 0.52 : 0;
   runtime.walkPhase += dt * (running ? 11 : moving ? 7.5 : 3.5);
   const swing = Math.sin(runtime.walkPhase) * targetAmplitude;
-  const bob = moving ? Math.abs(Math.sin(runtime.walkPhase * 2)) * 0.025 : 0;
+  const bob = moving && !airborne ? Math.abs(Math.sin(runtime.walkPhase * 2)) * 0.025 : 0;
+
+  if (airborne) {
+    // Rising pulls the knees up and the arms back, falling reaches out for the landing.
+    const tuck = (jump?.velocity ?? 0) > 0 ? 1 : 0.35;
+    parts.shoulders[0].rotation.x = lerp(parts.shoulders[0].rotation.x, -1.35 * tuck, 0.3);
+    parts.shoulders[1].rotation.x = lerp(parts.shoulders[1].rotation.x, -1.35 * tuck, 0.3);
+    parts.hipsJoints[0].rotation.x = lerp(parts.hipsJoints[0].rotation.x, 0.72 * tuck, 0.3);
+    parts.hipsJoints[1].rotation.x = lerp(parts.hipsJoints[1].rotation.x, 0.22 * tuck, 0.3);
+    parts.elbows[0].rotation.x = lerp(parts.elbows[0].rotation.x, 0.55, 0.3);
+    parts.elbows[1].rotation.x = lerp(parts.elbows[1].rotation.x, 0.55, 0.3);
+    parts.knees[0].rotation.x = lerp(parts.knees[0].rotation.x, 1.05 * tuck, 0.3);
+    parts.knees[1].rotation.x = lerp(parts.knees[1].rotation.x, 0.4 * tuck, 0.3);
+    runtime.playerRoot.position.y = CHARACTER_Y_OFFSET;
+    return;
+  }
 
   parts.shoulders[0].rotation.x = lerp(parts.shoulders[0].rotation.x, -swing, 0.42);
   parts.shoulders[1].rotation.x = lerp(parts.shoulders[1].rotation.x, swing, 0.42);

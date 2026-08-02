@@ -302,10 +302,18 @@ body.voxcel-map-open #touchLayer,body.voxcel-map-open #movePad,body.voxcel-map-o
     const source = handle?.mapLayout?.roads ?? handle?.roads ?? null;
     const x = source?.x ?? source?.vertical ?? handle?.mapLayout?.roadX;
     const z = source?.z ?? source?.horizontal ?? handle?.mapLayout?.roadZ;
+    const rings = Array.isArray(source?.rings) ? source.rings : [];
     return {
       x: Array.isArray(x) ? x.filter(Number.isFinite) : [...DEFAULT_ROADS.x],
       z: Array.isArray(z) ? z.filter(Number.isFinite) : [...DEFAULT_ROADS.z],
       width: Math.max(5, finiteNumber(source?.width, DEFAULT_ROADS.width)),
+      rings: rings
+        .filter((ring) => Number.isFinite(ring?.radius) && ring.radius > 0)
+        .map((ring) => ({
+          id: typeof ring.id === "string" ? ring.id : "ring",
+          radius: ring.radius,
+          width: Math.max(4, finiteNumber(ring.width, DEFAULT_ROADS.width)),
+        })),
     };
   }
 
@@ -540,21 +548,53 @@ body.voxcel-map-open #touchLayer,body.voxcel-map-open #movePad,body.voxcel-map-o
     }));
 
     const roadWidth = roads.width;
+    // Radial roads stop at the outermost loop line instead of running off the map edge.
+    const outerRing = roads.rings.reduce(
+      (limit, ring) => Math.max(limit, ring.radius + ring.width / 2),
+      0,
+    );
+    const spanZ = outerRing ? -outerRing : bounds.z;
+    const spanHeight = outerRing ? outerRing * 2 : bounds.height;
+    const spanX = outerRing ? -outerRing : bounds.x;
+    const spanWidth = outerRing ? outerRing * 2 : bounds.width;
     for (const x of roads.x) {
       addRoadRect(ui.roadGroup, {
         x: x - roadWidth / 2,
-        y: bounds.z,
+        y: spanZ,
         width: roadWidth,
-        height: bounds.height,
+        height: spanHeight,
       });
     }
     for (const z of roads.z) {
       addRoadRect(ui.roadGroup, {
-        x: bounds.x,
+        x: spanX,
         y: z - roadWidth / 2,
-        width: bounds.width,
+        width: spanWidth,
         height: roadWidth,
       });
+    }
+    for (const ring of roads.rings) {
+      ui.roadGroup.append(svgElement("rect", {
+        x: -ring.radius,
+        y: -ring.radius,
+        width: ring.radius * 2,
+        height: ring.radius * 2,
+        rx: ring.width,
+        fill: "none",
+        stroke: "#4a5660",
+        "stroke-width": ring.width,
+      }));
+      ui.roadGroup.append(svgElement("rect", {
+        x: -ring.radius,
+        y: -ring.radius,
+        width: ring.radius * 2,
+        height: ring.radius * 2,
+        rx: ring.width,
+        fill: "none",
+        stroke: "#7c858c",
+        "stroke-width": 1.2,
+        "stroke-dasharray": "6 5",
+      }));
     }
     for (const x of roads.x) {
       for (const z of roads.z) {
