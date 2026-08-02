@@ -24,6 +24,7 @@ for (const name of [
   "streetscape-detail-system.js",
   "city-map-system.js",
   "ring-road-system.js",
+  "city-traffic-system.js",
   "player-jump-system.js",
   "athletic-park-system.js",
   "modular-character-system.js",

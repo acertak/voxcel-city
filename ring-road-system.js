@@ -3,9 +3,9 @@
 
   if (window.__voxcelRingRoad?.ready) return;
 
-  const SYSTEM_VERSION = 1;
-  const RUNTIME_TIMEOUT_MS = 25_000;
-  const VEHICLE_DETAIL_TIMEOUT_MS = 9_000;
+  const SYSTEM_VERSION = 2;
+  const RUNTIME_TIMEOUT_MS = 40_000;
+  const ATHLETICS_WAIT_MS = 15_000;
 
   // The playable field is a 250x250 block grid inside a 400x400 ground plane, so the
   // loop line sits just outside the radial roads but well inside the walkable clamp.
@@ -16,39 +16,21 @@
   const SIDEWALK_RADIUS = RING_RADIUS + ROAD_HALF_WIDTH + SIDEWALK_HALF_WIDTH;
   const RAIL_RADIUS = SIDEWALK_RADIUS + SIDEWALK_HALF_WIDTH + 0.35;
   const CLEAR_MARGIN = 3;
-  const CORNER_RADIUS = 12;
-  // Traffic keeps right, so a counter-clockwise loop rides the outer lane the whole way.
   const LANE_RADIUS = RING_RADIUS + LANE_OFFSET;
   const DASH_SPACING = 7;
   const RAIL_POST_SPACING = 12;
   const LAMP_SPACING = 44;
   const JUNCTION_CLEARANCE = 8.5;
+  // The city's own grid, whose junctions the loop line ties into.
   const RADIAL_ROADS = Object.freeze({
     x: Object.freeze([0, 44]),
     z: Object.freeze([-70, 0, 70]),
   });
-
-  const RING_CRUISE_SPEED = 11;
-  const RING_ACCELERATION = 6;
-  const RING_BRAKING = 10;
-  const CITY_BUS_RIDE_SPEED = 8.4;
-  const BUS_DWELL_MS = 4_500;
-  const BUS_STOP_TOLERANCE = 2;
-  const YIELD_DISTANCE = 11;
-  const YIELD_HALF_WIDTH = 3.4;
+  const RADIAL_HALF_WIDTH = 4;
+  const RADIAL_LANE_OFFSET = 2;
+  const RADIAL_SIDEWALK_OFFSET = 5.25;
   const CORRIDOR_SWEEP_INTERVAL_MS = 1_000;
   const CORRIDOR_SWEEP_WINDOW_MS = 30_000;
-
-  const BUS_STOPS = Object.freeze([
-    Object.freeze({ id: "east-bay", name: "東ベイ通り", anchor: Object.freeze({ x: LANE_RADIUS, z: 0 }) }),
-    Object.freeze({ id: "north-44", name: "北44番街", anchor: Object.freeze({ x: 44, z: LANE_RADIUS }) }),
-    Object.freeze({ id: "north-central", name: "北セントラル", anchor: Object.freeze({ x: 0, z: LANE_RADIUS }) }),
-    Object.freeze({ id: "west-adventure", name: "西アドベンチャー口", anchor: Object.freeze({ x: -LANE_RADIUS, z: 70 }) }),
-    Object.freeze({ id: "west-green", name: "西グリーンパーク", anchor: Object.freeze({ x: -LANE_RADIUS, z: 0 }) }),
-    Object.freeze({ id: "west-south", name: "西サウスゲート", anchor: Object.freeze({ x: -LANE_RADIUS, z: -70 }) }),
-    Object.freeze({ id: "south-central", name: "南セントラル", anchor: Object.freeze({ x: 0, z: -LANE_RADIUS }) }),
-    Object.freeze({ id: "south-44", name: "南44番街", anchor: Object.freeze({ x: 44, z: -LANE_RADIUS }) }),
-  ]);
 
   const runtime = {
     ready: false,
@@ -58,20 +40,12 @@
     handle: null,
     constructors: null,
     root: null,
-    path: null,
-    stops: [],
-    ringBus: null,
-    ringBusState: null,
     clearedSceneryCount: 0,
     clearedTreeCount: 0,
     movedLandmarkCount: 0,
     movedLandmarkMeshCount: 0,
     meshCount: 0,
     registeredRoadRects: 0,
-    ride: null,
-    hud: null,
-    hudMarkup: null,
-    lastFrameAt: 0,
     lastSweepAt: 0,
     readyAt: 0,
     unregisterBeforeRender: null,
@@ -81,20 +55,10 @@
     __voxcelRingRoadSystem: true,
     version: SYSTEM_VERSION,
     getState,
+    geometry,
   };
   Object.defineProperty(api, "ready", { enumerable: true, get: () => runtime.ready });
   window.__voxcelRingRoad = api;
-
-  function clamp(value, minimum, maximum) {
-    return Math.max(minimum, Math.min(maximum, value));
-  }
-
-  function approach(current, target, rate, dt) {
-    const delta = target - current;
-    const step = rate * dt;
-    if (Math.abs(delta) <= step) return target;
-    return current + Math.sign(delta) * step;
-  }
 
   function chebyshev(x, z) {
     return Math.max(Math.abs(x), Math.abs(z));
@@ -413,160 +377,6 @@
     }
   }
 
-  function buildBusStopShelter(constructors, stop, index) {
-    const poleMaterial = new constructors.Material({ color: 0x3f4750, roughness: 0.7, metalness: 0.26 });
-    const signMaterial = new constructors.Material({
-      color: 0x4fbf8b,
-      emissive: 0x1f6b4a,
-      emissiveIntensity: 0.32,
-      roughness: 0.48,
-    });
-    const roofMaterial = new constructors.Material({ color: 0xd7dee6, roughness: 0.6, metalness: 0.18 });
-    const benchMaterial = new constructors.Material({ color: 0x8d6a45, roughness: 0.88 });
-    const edge = stop.edge;
-    // Centred on the pavement rather than spilling onto the grass behind it.
-    const shelter = edgePoint(edge, stop.along, ROAD_HALF_WIDTH + SIDEWALK_HALF_WIDTH);
-    const alongAxis = edge.axis === "ew" ? "x" : "z";
-    const spread = (offset) => (alongAxis === "x"
-      ? [shelter.x + offset, 0, shelter.z]
-      : [shelter.x, 0, shelter.z + offset]);
-
-    for (const offset of [-1.5, 1.5]) {
-      const base = spread(offset);
-      addCylinder(`ring-stop-post-${stop.id}-${offset}`, 0.08, 2.6, [base[0], 1.3, base[2]], poleMaterial);
-    }
-    addBox(
-      `ring-stop-roof-${stop.id}`,
-      alongAxis === "x" ? [3.6, 0.14, 1.5] : [1.5, 0.14, 3.6],
-      [shelter.x, 2.62, shelter.z],
-      roofMaterial,
-      { receiveShadow: false },
-    );
-    addBox(
-      `ring-stop-bench-${stop.id}`,
-      alongAxis === "x" ? [2.6, 0.12, 0.5] : [0.5, 0.12, 2.6],
-      [shelter.x, 0.55, shelter.z],
-      benchMaterial,
-    );
-    const signBase = edgePoint(edge, stop.along - 2.6, ROAD_HALF_WIDTH + 1.4);
-    addCylinder(`ring-stop-sign-pole-${stop.id}`, 0.06, 2.4, [signBase.x, 1.2, signBase.z], poleMaterial);
-    addBox(
-      `ring-stop-sign-${stop.id}`,
-      alongAxis === "x" ? [0.95, 0.6, 0.1] : [0.1, 0.6, 0.95],
-      [signBase.x, 2.35, signBase.z],
-      signMaterial,
-      { receiveShadow: false },
-    );
-    return index;
-  }
-
-  function buildLoopPath() {
-    const lane = LANE_RADIUS;
-    const corner = CORNER_RADIUS;
-    const straight = lane - corner;
-    const points = [];
-    const push = (x, z) => {
-      const previous = points[points.length - 1];
-      if (previous && Math.hypot(previous.x - x, previous.z - z) < 0.0005) return;
-      points.push({ x, z });
-    };
-    const arc = (centerX, centerZ, fromAngle, toAngle) => {
-      const steps = 8;
-      for (let step = 0; step <= steps; step += 1) {
-        const angle = fromAngle + (toAngle - fromAngle) * (step / steps);
-        push(centerX + Math.cos(angle) * corner, centerZ + Math.sin(angle) * corner);
-      }
-    };
-
-    push(lane, -straight);
-    push(lane, straight);
-    arc(straight, straight, 0, Math.PI / 2);
-    push(-straight, lane);
-    arc(-straight, straight, Math.PI / 2, Math.PI);
-    push(-lane, -straight);
-    arc(-straight, -straight, Math.PI, Math.PI * 1.5);
-    push(straight, -lane);
-    arc(straight, -straight, Math.PI * 1.5, Math.PI * 2);
-
-    const segments = [];
-    let total = 0;
-    for (let index = 0; index < points.length; index += 1) {
-      const from = points[index];
-      const to = points[(index + 1) % points.length];
-      const length = Math.hypot(to.x - from.x, to.z - from.z);
-      if (length < 0.0005) continue;
-      segments.push({ from, to, length, start: total });
-      total += length;
-    }
-    return { points, segments, total };
-  }
-
-  function samplePath(path, distance) {
-    const total = path.total;
-    const target = ((distance % total) + total) % total;
-    let low = 0;
-    let high = path.segments.length - 1;
-    while (low < high) {
-      const middle = (low + high + 1) >> 1;
-      if (path.segments[middle].start <= target) low = middle;
-      else high = middle - 1;
-    }
-    const segment = path.segments[low];
-    const amount = clamp((target - segment.start) / segment.length, 0, 1);
-    const dx = segment.to.x - segment.from.x;
-    const dz = segment.to.z - segment.from.z;
-    return {
-      x: segment.from.x + dx * amount,
-      z: segment.from.z + dz * amount,
-      heading: Math.atan2(dx, dz),
-    };
-  }
-
-  function pathDistanceOf(path, x, z) {
-    let best = { distance: 0, error: Infinity };
-    for (const segment of path.segments) {
-      const dx = segment.to.x - segment.from.x;
-      const dz = segment.to.z - segment.from.z;
-      const lengthSquared = dx * dx + dz * dz;
-      if (lengthSquared < 1e-6) continue;
-      const amount = clamp(
-        ((x - segment.from.x) * dx + (z - segment.from.z) * dz) / lengthSquared,
-        0,
-        1,
-      );
-      const px = segment.from.x + dx * amount;
-      const pz = segment.from.z + dz * amount;
-      const error = Math.hypot(px - x, pz - z);
-      if (error < best.error) best = { distance: segment.start + segment.length * amount, error };
-    }
-    return best.distance;
-  }
-
-  function loopAhead(path, from, to) {
-    const delta = to - from;
-    return ((delta % path.total) + path.total) % path.total;
-  }
-
-  function resolveStops(path) {
-    const resolved = BUS_STOPS.map((stop) => {
-      const radius = chebyshev(stop.anchor.x, stop.anchor.z);
-      const edge = EDGES.find((candidate) => (
-        candidate.axis === "ew"
-          ? Math.abs(stop.anchor.z) === radius && Math.sign(stop.anchor.z) === candidate.sign
-          : Math.abs(stop.anchor.x) === radius && Math.sign(stop.anchor.x) === candidate.sign
-      )) || EDGES[0];
-      const along = edge.axis === "ew" ? stop.anchor.x : stop.anchor.z;
-      return {
-        ...stop,
-        edge,
-        along,
-        distance: pathDistanceOf(path, stop.anchor.x, stop.anchor.z),
-      };
-    });
-    resolved.sort((left, right) => left.distance - right.distance);
-    return resolved;
-  }
-
   function isProceduralTree(object) {
     if (!object?.isGroup || object.children.length < 5) return false;
     let spheres = 0;
@@ -606,7 +416,7 @@
   }
 
   function isRelocatable(object) {
-    return !(
+    return object.visible && !(
       object === runtime.root ||
       object === runtime.handle.playerRoot ||
       object === runtime.handle.playerShadow ||
@@ -644,6 +454,9 @@
     const towers = [];
     for (const object of handle.scene.children) {
       if (!object.isMesh || object.geometry?.type !== "BoxGeometry") continue;
+      // Landmarks the adventure park has already demolished are left exactly where they
+      // are: it identifies them by position when it takes over its own site.
+      if (!object.visible) continue;
       const parameters = object.geometry.parameters || {};
       if (!(parameters.height >= 18)) continue;
       towers.push({
@@ -748,348 +561,12 @@
     window.__voxcelMap?.refresh?.();
   }
 
-  function waitFor(predicate, timeoutMs) {
-    return new Promise((resolve) => {
-      const startedAt = performance.now();
-      if (predicate()) {
-        resolve(true);
-        return;
-      }
-      const timer = window.setInterval(() => {
-        if (predicate()) {
-          window.clearInterval(timer);
-          resolve(true);
-          return;
-        }
-        if (performance.now() - startedAt > timeoutMs) {
-          window.clearInterval(timer);
-          resolve(false);
-        }
-      }, 40);
-    });
-  }
-
-  function retagClonedVehicle(mesh, id) {
-    mesh.traverse((object) => {
-      if (!object.userData) return;
-      if (typeof object.userData.voxcelVehicleId === "string") object.userData.voxcelVehicleId = id;
-    });
-    mesh.userData ||= {};
-    mesh.userData.voxcelVehicleId = id;
-    mesh.userData.voxcelRingBus = true;
-  }
-
-  function createRingBus(handle) {
-    const template = (handle.vehicles || []).find((vehicle) => vehicle.type === "bus");
-    if (!template?.m?.clone) throw new Error("No bus available to clone for the loop line");
-    const mesh = template.m.clone(true);
-    retagClonedVehicle(mesh, "voxcel-loop-line-bus");
-
-    const body = mesh.children.find((child) => (
-      child.isMesh && child.geometry?.type === "BoxGeometry" && child.material?.color
-    ));
-    if (body) {
-      body.material = body.material.clone();
-      body.material.color.setHex(0x3fae7a);
-    }
-
-    const start = samplePath(runtime.path, 0);
-    mesh.position.set(start.x, 0, start.z);
-    mesh.rotation.y = start.heading;
-    // Parented to the loop-line root so the adventure park's site clearing (which culls
-    // scene children by position) can never hide the bus mid-route.
-    runtime.root.add(mesh);
-
-    const vehicle = {
-      m: mesh,
-      axis: "ns",
-      road: RING_RADIUS,
-      dir: 1,
-      lanePos: LANE_RADIUS,
-      sp: RING_CRUISE_SPEED,
-      curSp: 0,
-      targetSp: 0,
-      len: 10.8,
-      type: "bus",
-      // Kept manual so the city's straight-line traffic loop never touches it; the
-      // loop-line autopilot below owns its movement instead.
-      manual: true,
-      driveSpeed: 0,
-      steerInput: 0,
-      voxcelRingBus: true,
-    };
-    handle.vehicles.push(vehicle);
-    runtime.ringBus = vehicle;
-    runtime.ringBusState = {
-      distance: 0,
-      speed: 0,
-      stopIndex: 0,
-      dwellUntil: 0,
-      lastAnnouncedStop: -1,
-    };
-    return vehicle;
-  }
-
-  function vehicleAhead(vehicle, reach) {
-    const position = vehicle.m.position;
-    const forwardX = Math.sin(vehicle.m.rotation.y);
-    const forwardZ = Math.cos(vehicle.m.rotation.y);
-    for (const other of runtime.handle.vehicles) {
-      if (other === vehicle || !other.m) continue;
-      const dx = other.m.position.x - position.x;
-      const dz = other.m.position.z - position.z;
-      const forward = dx * forwardX + dz * forwardZ;
-      if (forward <= 0 || forward > reach) continue;
-      const lateral = Math.abs(dx * forwardZ - dz * forwardX);
-      if (lateral <= YIELD_HALF_WIDTH) return forward;
-    }
-    return null;
-  }
-
-  function axisIsGreen(axis) {
-    const lights = runtime.handle.trafficLights;
-    if (!Array.isArray(lights)) return true;
-    for (const light of lights) {
-      if (light?.kind !== "vehicle" || light.axis !== axis) continue;
-      return (light.mats?.[2]?.emissiveIntensity ?? 0) > 1.5;
-    }
-    return true;
-  }
-
-  function redLightDistance(bus) {
-    if (axisIsGreen(bus.axis)) return null;
-    const lines = runtime.handle.stopLines;
-    if (!Array.isArray(lines)) return null;
-    const position = bus.m.position;
-    let best = null;
-    for (const line of lines) {
-      if (line.axis !== bus.axis || line.dir !== bus.dir) continue;
-      const lateral = bus.axis === "ns"
-        ? Math.abs(position.x - line.x)
-        : Math.abs(position.z - line.z);
-      if (lateral > 2.8) continue;
-      const ahead = bus.axis === "ns"
-        ? (line.z - position.z) * bus.dir
-        : (line.x - position.x) * bus.dir;
-      // Already committed to the junction: finishing the crossing beats stopping inside it.
-      if (ahead < 3.2 || ahead > 20) continue;
-      if (best === null || ahead < best) best = ahead;
-    }
-    return best;
-  }
-
-  function driveRingBus(now, dt, ridden) {
-    const bus = runtime.ringBus;
-    const busState = runtime.ringBusState;
-    if (!bus || !busState) return;
-
-    const stops = runtime.stops;
-    const nextStop = stops[busState.stopIndex % stops.length];
-    // Signed distance to the next stop: negative once the bus has just rolled past it.
-    const ahead = nextStop ? loopAhead(runtime.path, busState.distance, nextStop.distance) : Infinity;
-    const toStop = nextStop && ahead > runtime.path.total / 2 ? ahead - runtime.path.total : ahead;
-
-    let target = RING_CRUISE_SPEED;
-    if (now < busState.dwellUntil) {
-      target = 0;
-    } else if (nextStop && toStop > 0 && toStop < 30) {
-      target = Math.min(target, Math.max(0, (toStop - 0.4) * 0.9));
-    }
-
-    const gap = vehicleAhead(bus, YIELD_DISTANCE);
-    if (gap !== null) target = Math.min(target, Math.max(0, (gap - 5.4) * 1.6));
-
-    const rate = target < busState.speed ? RING_BRAKING : RING_ACCELERATION;
-    busState.speed = approach(busState.speed, target, rate, dt);
-    busState.distance += busState.speed * dt;
-
-    if (
-      nextStop &&
-      now >= busState.dwellUntil &&
-      busState.speed <= 1 &&
-      Math.abs(toStop) <= BUS_STOP_TOLERANCE
-    ) {
-      busState.dwellUntil = now + BUS_DWELL_MS;
-      busState.arrivedStopId = nextStop.id;
-      if (ridden && busState.lastAnnouncedStop !== busState.stopIndex) {
-        busState.lastAnnouncedStop = busState.stopIndex;
-        runtime.handle.notify?.(`🚏 ${nextStop.name}`);
-      }
-      busState.stopIndex = (busState.stopIndex + 1) % stops.length;
-    }
-
-    const sample = samplePath(runtime.path, busState.distance);
-    bus.m.position.set(sample.x, 0, sample.z);
-    bus.m.rotation.y = sample.heading;
-    bus.axis = Math.abs(Math.cos(sample.heading)) >= Math.abs(Math.sin(sample.heading)) ? "ns" : "ew";
-    bus.dir = bus.axis === "ns"
-      ? (Math.cos(sample.heading) >= 0 ? 1 : -1)
-      : (Math.sin(sample.heading) >= 0 ? 1 : -1);
-    bus.curSp = busState.speed;
-    bus.targetSp = target;
-    bus.driveSpeed = 0;
-  }
-
-  function driveCityBus(bus, dt) {
-    const position = bus.m.position;
-    const axis = bus.axis;
-    const dir = bus.dir;
-    let target = CITY_BUS_RIDE_SPEED;
-
-    const stopDistance = redLightDistance(bus);
-    if (stopDistance !== null) target = Math.min(target, Math.max(0, (stopDistance - 3.2) * 1.5));
-    const gap = vehicleAhead(bus, YIELD_DISTANCE);
-    if (gap !== null) target = Math.min(target, Math.max(0, (gap - 5.4) * 1.6));
-
-    const rate = target < (bus.rideSpeed || 0) ? RING_BRAKING : RING_ACCELERATION;
-    bus.rideSpeed = approach(bus.rideSpeed || 0, target, rate, dt);
-    const step = bus.rideSpeed * dt * dir;
-
-    if (axis === "ns") {
-      position.x = bus.lanePos;
-      position.z += step;
-      if (position.z > 132) position.z = -132;
-      if (position.z < -132) position.z = 132;
-      bus.m.rotation.y = dir > 0 ? 0 : Math.PI;
-    } else {
-      position.z = bus.lanePos;
-      position.x += step;
-      if (position.x > 132) position.x = -132;
-      if (position.x < -132) position.x = 132;
-      bus.m.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
-    }
-    bus.curSp = bus.rideSpeed;
-    bus.targetSp = target;
-    bus.driveSpeed = 0;
-  }
-
-  function ensureHud() {
-    if (runtime.hud) return runtime.hud;
-    const element = document.createElement("div");
-    element.id = "voxcelBusHud";
-    element.className = "voxcel-bus-hud";
-    element.setAttribute("aria-live", "polite");
-    const style = document.createElement("style");
-    style.textContent = `
-.voxcel-bus-hud{position:fixed;top:104px;left:50%;transform:translateX(-50%);z-index:21;display:none;
-gap:10px;align-items:center;padding:6px 16px;border-radius:12px;font-size:11px;font-weight:700;
-letter-spacing:.04em;color:#eef4ff;background:rgba(10,16,30,.82);border:1px solid rgba(255,255,255,.14);
-backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:none;text-align:center}
-.voxcel-bus-hud.show{display:flex}
-.voxcel-bus-hud .line{color:#5ddb6a}
-.voxcel-bus-hud .next{color:#ffd666}
-`;
-    document.head.append(style);
-    document.body.append(element);
-    runtime.hud = element;
-    return element;
-  }
-
-  function updateHud(vehicle) {
-    const hud = ensureHud();
-    if (!vehicle) {
-      if (runtime.hudMarkup !== null) {
-        runtime.hudMarkup = null;
-        hud.classList.remove("show");
-      }
-      return;
-    }
-    const isRing = vehicle === runtime.ringBus;
-    const busState = runtime.ringBusState;
-    const nextStop = isRing && busState ? runtime.stops[busState.stopIndex % runtime.stops.length] : null;
-    const markup = isRing
-      ? `<span class="line">🚌 環状線</span><span>自動運転中</span><span class="next">次: ${nextStop ? nextStop.name : "—"}</span><span>Eで降車</span>`
-      : '<span class="line">🚌 市内バス</span><span>自動運転中</span><span>Eで降車</span>';
-    if (markup !== runtime.hudMarkup) {
-      runtime.hudMarkup = markup;
-      hud.innerHTML = markup;
-    }
-    hud.classList.add("show");
-  }
-
-  function relabelBoardingPrompt() {
-    const button = document.getElementById("iBtn");
-    if (!button || !button.classList.contains("show")) return;
-    const text = button.textContent || "";
-    if (text.includes("バス") && text.includes("運転")) {
-      button.textContent = "E: 🚌 バスに乗る";
-    }
-  }
-
-  function beginRide(vehicle) {
-    runtime.ride = { vehicle, startedAt: performance.now() };
-    runtime.handle.setMovementLocked?.(true);
-    if (vehicle !== runtime.ringBus) vehicle.rideSpeed = Math.abs(vehicle.curSp || 0);
-    runtime.handle.notify?.(vehicle === runtime.ringBus
-      ? "🚌 環状線バスに乗車（自動運転）"
-      : "🚌 バスに乗車（自動運転）");
-  }
-
-  function endRide() {
-    const previous = runtime.ride?.vehicle;
-    runtime.ride = null;
-    runtime.handle.setMovementLocked?.(false);
-    if (previous && previous !== runtime.ringBus) previous.rideSpeed = 0;
-    updateHud(null);
-  }
-
-  function syncRider(vehicle) {
-    const handle = runtime.handle;
-    const root = handle.playerRoot;
-    const position = vehicle.m.position;
-    root.position.x = position.x;
-    root.position.z = position.z;
-    root.rotation.y = vehicle.m.rotation.y;
-    handle.playerShadow.position.set(position.x, 0.02, position.z);
-
-    const camera = handle.camera;
-    const cameraState = handle.getCameraState?.();
-    if (!camera || !cameraState) return;
-    const targetY = position.y + (vehicle.type === "bus" ? 3.4 : 2.35);
-    const horizontal = Math.cos(cameraState.pitch) * cameraState.distance;
-    camera.position.set(
-      position.x + Math.sin(cameraState.yaw) * horizontal,
-      targetY + Math.sin(cameraState.pitch) * cameraState.distance,
-      position.z + Math.cos(cameraState.yaw) * horizontal,
-    );
-    camera.lookAt(position.x, targetY, position.z);
-  }
-
   function update(now) {
-    const handle = runtime.handle;
-    if (!handle) return;
-    const dt = runtime.lastFrameAt
-      ? clamp((now - runtime.lastFrameAt) / 1000, 0.001, 1 / 15)
-      : 1 / 60;
-    runtime.lastFrameAt = now;
-
+    if (!runtime.handle) return;
     sweepRingCorridor(now);
-
-    const boarded = handle.state?.vehicle || null;
-    const busBoarded = boarded?.type === "bus" ? boarded : null;
-
-    if (runtime.ride && runtime.ride.vehicle !== busBoarded) endRide();
-    if (busBoarded && !runtime.ride) beginRide(busBoarded);
-
-    // T4() (the built-in "get off" path) hands vehicles back to the city traffic loop;
-    // the loop-line bus has to stay on its own autopilot instead.
-    if (runtime.ringBus && !runtime.ringBus.manual) runtime.ringBus.manual = true;
-
-    driveRingBus(now, dt, runtime.ride?.vehicle === runtime.ringBus);
-
-    if (runtime.ride) {
-      const vehicle = runtime.ride.vehicle;
-      if (vehicle !== runtime.ringBus) driveCityBus(vehicle, dt);
-      syncRider(vehicle);
-      updateHud(vehicle);
-    } else {
-      updateHud(null);
-      relabelBoardingPrompt();
-    }
   }
 
   function getState() {
-    const busState = runtime.ringBusState;
     return {
       ready: runtime.ready,
       version: SYSTEM_VERSION,
@@ -1098,44 +575,39 @@ backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:non
       error: runtime.error,
       radius: RING_RADIUS,
       roadWidth: 2 * ROAD_HALF_WIDTH,
+      laneOffset: LANE_OFFSET,
       laneRadius: LANE_RADIUS,
-      loopLength: runtime.path ? Math.round(runtime.path.total * 100) / 100 : 0,
+      sidewalkRadius: SIDEWALK_RADIUS,
       meshCount: runtime.meshCount,
       clearedSceneryCount: runtime.clearedSceneryCount,
       clearedTreeCount: runtime.clearedTreeCount,
       movedLandmarkCount: runtime.movedLandmarkCount,
       movedLandmarkMeshCount: runtime.movedLandmarkMeshCount,
       registeredRoadRects: runtime.registeredRoadRects,
-      stops: runtime.stops.map((stop) => ({
-        id: stop.id,
-        name: stop.name,
-        x: Math.round(stop.anchor.x * 100) / 100,
-        z: Math.round(stop.anchor.z * 100) / 100,
-        distance: Math.round(stop.distance * 100) / 100,
-      })),
-      ringBus: runtime.ringBus
-        ? {
-          type: runtime.ringBus.type,
-          manual: runtime.ringBus.manual,
-          x: Math.round(runtime.ringBus.m.position.x * 100) / 100,
-          z: Math.round(runtime.ringBus.m.position.z * 100) / 100,
-          speed: Math.round((busState?.speed ?? 0) * 100) / 100,
-          nextStopId: runtime.stops[(busState?.stopIndex ?? 0) % (runtime.stops.length || 1)]?.id ?? null,
-          onRing: Math.abs(chebyshev(runtime.ringBus.m.position.x, runtime.ringBus.m.position.z) - LANE_RADIUS) < CORNER_RADIUS + 0.5,
-        }
-        : null,
-      riding: runtime.ride
-        ? {
-          type: runtime.ride.vehicle.type,
-          line: runtime.ride.vehicle === runtime.ringBus ? "loop" : "city",
-          autopilot: true,
-          movementLocked: Boolean(runtime.handle?.movementLocked),
-        }
-        : null,
     };
   }
 
-  async function initialize(handle) {
+  // The road network the traffic system routes over: the loop line plus the radial grid
+  // it already shares junctions with.
+  function geometry() {
+    return {
+      ring: {
+        radius: RING_RADIUS,
+        halfWidth: ROAD_HALF_WIDTH,
+        laneOffset: LANE_OFFSET,
+        sidewalkRadius: SIDEWALK_RADIUS,
+      },
+      radial: {
+        x: [...RADIAL_ROADS.x],
+        z: [...RADIAL_ROADS.z],
+        halfWidth: RADIAL_HALF_WIDTH,
+        laneOffset: RADIAL_LANE_OFFSET,
+        sidewalkOffset: RADIAL_SIDEWALK_OFFSET,
+      },
+    };
+  }
+
+  function initialize(handle) {
     runtime.handle = handle;
     runtime.status = "initializing";
     runtime.constructors = resolveConstructors(handle);
@@ -1143,9 +615,6 @@ backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:non
     runtime.root.name = "VoxcelRingRoadRoot";
     runtime.root.userData.voxcelRingRoad = true;
     handle.scene.add(runtime.root);
-
-    runtime.path = buildLoopPath();
-    runtime.stops = resolveStops(runtime.path);
 
     clearRingCorridor(handle);
     const materials = collectRoadMaterials(handle, runtime.constructors);
@@ -1155,13 +624,9 @@ backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:non
     buildSidewalk(materials);
     buildGuardRail(runtime.constructors);
     buildStreetLamps(runtime.constructors);
-    runtime.stops.forEach((stop, index) => buildBusStopShelter(runtime.constructors, stop, index));
 
     registerRoadRects(handle);
     registerMapRing(handle);
-
-    await waitFor(() => window.__voxcelVehicles?.ready === true, VEHICLE_DETAIL_TIMEOUT_MS);
-    createRingBus(handle);
 
     handle.scene.updateMatrixWorld(true);
     window.__voxcelEnhancements?.refreshColliders?.();
@@ -1185,7 +650,12 @@ backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:non
   const startedAt = performance.now();
   const timer = window.setInterval(() => {
     const handle = window.__voxcelPlayer;
+    // The adventure park identifies the landmarks it demolishes by position, so it has to
+    // claim its site before anything here starts shifting scenery around.
+    const parkSettled = window.__voxcelAthletics?.ready === true ||
+      performance.now() - startedAt > ATHLETICS_WAIT_MS;
     if (
+      parkSettled &&
       handle?.scene?.traverse &&
       handle?.playerRoot?.position &&
       handle?.playerShadow?.position &&
