@@ -10,7 +10,9 @@
     "test:e2e": "playwright test",
     "prepare:cloudflare-assets": "node ./scripts/prepare-cloudflare-assets.mjs",
     "typecheck": "tsc --noEmit",
-    "deploy": "npm run prepare:cloudflare-assets && wrangler deploy"
+    "build:cloudflare": "npm ci && npm run prepare:cloudflare-assets && npm run typecheck && wrangler deploy --dry-run",
+    "deploy": "npm run prepare:cloudflare-assets && wrangler deploy",
+    "deploy:production": "wrangler deploy"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260714.1",
