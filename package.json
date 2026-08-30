@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "build:cloudflare": "npm ci && npm run prepare:cloudflare-assets && npm run typecheck && wrangler deploy --dry-run",
     "deploy": "npm run prepare:cloudflare-assets && wrangler deploy",
-    "deploy:production": "wrangler deploy"
+    "deploy:production": "wrangler deploy",
+    "verify:production:browser": "node scripts/verify-production-browser.mjs",
+    "verify:production:browser:setup": "node scripts/configure-production-browser.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260714.1",
