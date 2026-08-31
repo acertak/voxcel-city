@@ -83,7 +83,7 @@ async function basicCredentials() {
       "Run the repository's verify:production:browser:setup command.",
     );
   }
-  return { username, password };
+  return { username, password, origin: config.origin };
 }
 
 function accessLoginUrl(value) {
