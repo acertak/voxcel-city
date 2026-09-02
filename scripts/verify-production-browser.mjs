@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { chromium } from "playwright";
 
 import { PRODUCTION_BROWSER_CONFIG as config } from "./production-browser.config.mjs";
+import { initializeAppLoginSession } from "./production-browser-session.mjs";
 
 const execFileAsync = promisify(execFile);
 const profileRoot = process.env.PRODUCTION_BROWSER_PROFILE_ROOT ??
@@ -71,15 +72,14 @@ async function readKeychain(service) {
   }
 }
 
-async function basicCredentials() {
-  if (config.auth.kind !== "basic") return undefined;
-  const username = process.env.PRODUCTION_BROWSER_BASIC_USERNAME?.trim() ||
+async function appLoginCredentials() {
+  const username = process.env.PRODUCTION_BROWSER_APP_USERNAME?.trim() ||
     await readKeychain(config.auth.usernameService);
-  const password = process.env.PRODUCTION_BROWSER_BASIC_PASSWORD?.trim() ||
+  const password = process.env.PRODUCTION_BROWSER_APP_PASSWORD?.trim() ||
     await readKeychain(config.auth.passwordService);
   if (!username || !password) {
     throw new Error(
-      `${config.id}: Basic credentials are missing. ` +
+      `${config.id}: application-login credentials are missing. ` +
       "Run the repository's verify:production:browser:setup command.",
     );
   }
@@ -183,7 +183,7 @@ async function verifyBoundary() {
 
 async function verifyBrowser(options) {
   const startedAt = Date.now();
-  const httpCredentials = await basicCredentials();
+  const appCredentials = await appLoginCredentials();
   await ensureDirectory(profileRoot);
   const runDirectory = join(resultRoot, new Date().toISOString().replace(/[:.]/gu, "-"));
   await ensureDirectory(runDirectory);
@@ -193,9 +193,9 @@ async function verifyBrowser(options) {
     context = await chromium.launchPersistentContext(profileRoot, {
       channel: "chrome",
       headless: !options.headed,
-      httpCredentials,
       viewport: { width: 1440, height: 900 },
     });
+    await initializeAppLoginSession(context, config.origin, appCredentials);
     const page = context.pages()[0] ?? await context.newPage();
     const consoleErrors = [];
     const pageErrors = [];

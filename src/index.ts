@@ -1,42 +1,19 @@
-interface Env {
+import {
+  type AppLoginEnv,
+  enforceAppLogin,
+  protectAuthenticatedResponse,
+} from './app-login';
+
+interface VoxcelEnv extends AppLoginEnv {
   ASSETS: Fetcher;
-  MYCRAFT_AUTH: Fetcher;
 }
 
-const BASIC_AUTH_CHALLENGE = 'Basic realm="MyCraft"';
-
-function unauthorized(): Response {
-  return new Response("Unauthorized", {
-    status: 401,
-    headers: {
-      "Cache-Control": "no-store",
-      "WWW-Authenticate": BASIC_AUTH_CHALLENGE,
-    },
-  });
-}
-
-async function authorizeWithMycraft(request: Request, env: Env): Promise<Response | null> {
-  const authorization = request.headers.get("Authorization");
-
-  if (!authorization?.startsWith("Basic ")) {
-    return unauthorized();
-  }
-
-  try {
-    const authResponse = await env.MYCRAFT_AUTH.fetch(
-      new Request("https://mycraft.internal/healthz", {
-        headers: { Authorization: authorization },
-      }),
-    );
-
-    return authResponse.ok ? null : unauthorized();
-  } catch {
-    return new Response("Authentication service unavailable", {
-      status: 503,
-      headers: { "Cache-Control": "no-store" },
-    });
-  }
-}
+const APP_LOGIN_BRAND = Object.freeze({
+  id: 'voxcel-city',
+  title: 'Voxcel City',
+  subtitle: 'この街は非公開です。アプリ専用アカウントでログインしてください。',
+  accent: '#fb7185',
+});
 
 const PLAYER_HANDLE =
   "window.__voxcelPlayer={scene:N,playerRoot:CA,playerShadow:_t}";
@@ -78,9 +55,9 @@ function prepareAppShell(html: string): string {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const authFailure = await authorizeWithMycraft(request, env);
-    if (authFailure) return authFailure;
+  async fetch(request: Request, env: VoxcelEnv): Promise<Response> {
+    const authResponse = await enforceAppLogin(request, env, APP_LOGIN_BRAND);
+    if (authResponse) return authResponse;
 
     const url = new URL(request.url);
     const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -90,7 +67,7 @@ export default {
     const assetResponse = await env.ASSETS.fetch(new Request(assetUrl, request));
 
     if (pathname !== "/index.html" || !assetResponse.ok) {
-      return assetResponse;
+      return protectAuthenticatedResponse(assetResponse, pathname);
     }
 
     const html = prepareAppShell(await assetResponse.text());
@@ -99,10 +76,10 @@ export default {
     headers.set("Cache-Control", "no-store");
     headers.delete("Content-Length");
 
-    return new Response(html, {
+    return protectAuthenticatedResponse(new Response(html, {
       status: assetResponse.status,
       statusText: assetResponse.statusText,
       headers,
-    });
+    }), pathname);
   },
 };

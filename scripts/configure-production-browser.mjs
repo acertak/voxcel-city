@@ -22,10 +22,9 @@ async function storePromptedValue(service, label) {
   if (exitCode !== 0) throw new Error(`Keychain update failed for ${label}`);
 }
 
-if (config.auth.kind !== "basic") {
-  console.log(`${config.id}: Basic認証は使用しません。--authorizeで対話ログインしてください。`);
-} else {
-  await storePromptedValue(config.auth.usernameService, `${config.id} のBasic認証ユーザー名`);
-  await storePromptedValue(config.auth.passwordService, `${config.id} のBasic認証パスワード`);
-  console.log(`${config.id}: Basic credentials stored in macOS Keychain`);
+if (!config.auth.usernameService || !config.auth.passwordService) {
+  throw new Error(`${config.id}: application-login Keychain services are not configured`);
 }
+await storePromptedValue(config.auth.usernameService, `${config.id} のアプリログインユーザー名`);
+await storePromptedValue(config.auth.passwordService, `${config.id} のアプリログインパスワード`);
+console.log(`${config.id}: application-login credentials stored in macOS Keychain`);
