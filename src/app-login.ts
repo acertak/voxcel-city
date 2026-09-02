@@ -122,7 +122,9 @@ function safeNextPath(value: string | null): string {
 function trustedMutation(request: Request): boolean {
   const origin = request.headers.get('Origin')
   const fetchSite = request.headers.get('Sec-Fetch-Site')
-  return origin === new URL(request.url).origin && (!fetchSite || fetchSite === 'same-origin')
+  if (fetchSite && fetchSite !== 'same-origin') return false
+  if (origin && origin !== 'null') return origin === new URL(request.url).origin
+  return fetchSite === 'same-origin' && request.headers.get('Sec-Fetch-Mode') === 'navigate'
 }
 
 async function readBoundedForm(request: Request): Promise<URLSearchParams | null> {
