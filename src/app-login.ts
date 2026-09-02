@@ -181,7 +181,11 @@ function configValid(env: AppLoginEnv): env is Required<AppLoginEnv> {
   return Boolean(
     env.APP_LOGIN_USERNAME?.trim()
       && env.APP_LOGIN_PASSWORD
-      && env.APP_LOGIN_PASSWORD.length >= 12
+      && env.APP_LOGIN_PASSWORD.length >= 10
+      && /[a-z]/u.test(env.APP_LOGIN_PASSWORD)
+      && /[A-Z]/u.test(env.APP_LOGIN_PASSWORD)
+      && /[0-9]/u.test(env.APP_LOGIN_PASSWORD)
+      && /[^A-Za-z0-9]/u.test(env.APP_LOGIN_PASSWORD)
       && env.APP_LOGIN_SESSION_SECRET
       && env.APP_LOGIN_SESSION_SECRET.length >= 32,
   )
