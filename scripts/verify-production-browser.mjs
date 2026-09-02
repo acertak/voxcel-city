@@ -155,7 +155,10 @@ async function requireApplicationSession(page, authorize) {
 }
 
 async function verifyBoundary() {
-  const response = await fetch(config.origin, { redirect: "manual" });
+  const response = await fetch(config.origin, {
+    redirect: "manual",
+    headers: { Accept: "text/html" },
+  });
   const location = response.headers.get("Location");
   if (response.status !== config.boundary.status) {
     throw new Error(
